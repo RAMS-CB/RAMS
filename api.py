@@ -34,6 +34,13 @@ async def root():
 class QueryRequest(BaseModel):
     query: str
 
+class ChunkRequest(BaseModel):
+    text: str
+    doc_id: str = "test_doc"
+    chunk_size: int = 500
+    overlap: int = 50
+    store: bool = False
+
 # Example API Route for Retrieval (can connect to services later)
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
@@ -49,6 +56,41 @@ async def ask_question(request: QueryRequest):
         "answer": "This is a mock answer. Services not fully connected yet."
     }
 
+@app.post("/chunk")
+async def create_chunks(request: ChunkRequest):
+    if not request.text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+        
+    try:
+        if request.store:
+            from ingest.chunker import chunk_and_store
+            inserted_ids = chunk_and_store(
+                doc_id=request.doc_id, 
+                text=request.text, 
+                chunk_size=request.chunk_size, 
+                overlap=request.overlap
+            )
+            return {
+                "message": "Chunks created and stored successfully",
+                "doc_id": request.doc_id,
+                "chunk_count": len(inserted_ids),
+                "inserted_ids": inserted_ids
+            }
+        else:
+            from ingest.chunker import chunk_text
+            chunks = chunk_text(
+                text=request.text, 
+                chunk_size=request.chunk_size, 
+                overlap=request.overlap
+            )
+            return {
+                "message": "Chunks created successfully (not stored)",
+                "doc_id": request.doc_id,
+                "chunk_count": len(chunks),
+                "chunks": chunks
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 if __name__ == "__main__":
     import uvicorn
     # Make sure this runs on a different port or the same port depending on your needs.
