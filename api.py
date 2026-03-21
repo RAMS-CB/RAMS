@@ -231,5 +231,7 @@ async def delete_document_source(doc_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    # Make sure this runs on a different port or the same port depending on your needs.
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    # Render and other hosting providers set the PORT environment variable.
+    # Default to 8000 for local development if PORT is not set.
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("api:app", host="0.0.0.0", port=port)
