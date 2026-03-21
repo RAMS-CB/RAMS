@@ -13,40 +13,35 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ingest.loader import extract_text
 # from ingest.chunker import chunk_text
 from ingest.embedder import generate_embeddings
-# from services.retrieval import replace_vectors_in_faiss
+from services.retrieval import replace_vectors_in_faiss
+from database.mongo_connection import get_db_connection
 
 
 
 
-# def fetch_latest_document() -> Dict[str, Any]:
-#     """Fetch the latest document metadata (like its hash) to know if it changed."""
-#     # Replace with your actual published Google Doc URL
-#     google_doc_url = "https://docs.google.com/document/d/e/2PACX-1vQ.../pub"
-    
-#     try:
-#         # We need to fetch it to know if it changed, unfortunately published
-#         # Google docs don't always give a reliable ETag without downloading.
-#         response = requests.get(google_doc_url)
-#         response.raise_for_status()
+def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
+    """Fetch the document content from its URL to check if it changed."""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
         
-#         # Simple hash of the raw HTML content to detect changes
-#         content_hash = hashlib.md5(response.content).hexdigest()
+        # Simple hash of the raw HTML content to detect changes
+        content_hash = hashlib.md5(response.content).hexdigest()
         
-#         return {
-#             "id": "google_doc_main",
-#             "content_hash": content_hash,
-#             "url": google_doc_url,
-#             # We can optionally pass the raw HTML forward so we don't have to download again
-#             "raw_html": response.text 
-#         }
-#     except Exception as e:
-#         print(f"Error fetching Google Doc: {e}")
-#         return {
-#             "id": "google_doc_main",
-#             "content_hash": "error",
-#             "url": google_doc_url,
-#             "raw_html": ""
-#         }
+        return {
+            "id": doc_id,
+            "content_hash": content_hash,
+            "url": url,
+            "raw_html": response.text 
+        }
+    except Exception as e:
+        print(f"Error fetching document '{doc_id}' at '{url}': {e}")
+        return {
+            "id": doc_id,
+            "content_hash": "error",
+            "url": url,
+            "raw_html": ""
+        }
 
 
 
@@ -54,66 +49,110 @@ from ingest.embedder import generate_embeddings
 
 def get_stored_document_hash(doc_id: str) -> str:
     """Check Mongo for the currently stored version/hash of the document."""
-    # Mock implementation
-    return "old_hash_000"
+    client = get_db_connection()
+    db = client["rams_db"]
+    
+    # Check the "metadata" collection for this document
+    doc = db["metadata"].find_one({"doc_id": doc_id})
+    if doc and "content_hash" in doc:
+        return doc["content_hash"]
+        
+    return ""
 
 def update_mongo_metadata(doc_id: str, new_hash: str):
     """Update MongoDB metadata with the new document hash and status."""
-    print(f"Updated Mongo metadata for document {doc_id} with new hash {new_hash}")
+    client = get_db_connection()
+    db = client["rams_db"]
+    
+    # Upsert the new hash into the "metadata" collection
+    db["metadata"].update_one(
+        {"doc_id": doc_id},
+        {"$set": {
+            "content_hash": new_hash,
+            "last_updated_timestamp": time.time()
+        }},
+        upsert=True
+    )
+    print(f"Updated Mongo metadata for document '{doc_id}' with new hash '{new_hash}'")
 
 def chunk_text(text: str) -> list:
     # This would typically be in ingest.chunker
     return [text]
 
 
-def replace_vectors_in_faiss(doc_id: str, embeddings: list):
-    # This would typically be in services or a vector DB module
-    print(f"Replaced vectors in FAISS for document {doc_id}")
 
 def process_pipeline():
-    """Main pipeline to process document and update DBs if changed."""
+    """Main pipeline to process all documents and update DBs if changed."""
     print("Scheduler Triggered: Checking for document updates...")
     
-    # Fetch latest document
-    latest_doc = fetch_latest_document()
-    doc_id = latest_doc.get("id")
-    new_hash = latest_doc.get("content_hash")
+    client = get_db_connection()
+    db = client["rams_db"]
+    sources = list(db["document_sources"].find({}))
     
-    # Check if changed (hash/version compare)
-    stored_hash = get_stored_document_hash(doc_id)
-    
-    if new_hash != stored_hash:
-        print(f"Document {doc_id} has changed. Processing pipeline...")
+    if not sources:
+        print("No document sources registered. Pipeline execution skipped.")
+        return
         
-        # Extract text (loader)
-        text = extract_text(latest_doc)
+    for source in sources:
+        doc_id = source.get("doc_id")
+        url = source.get("url")
         
-        # Chunk text (chunker)
-        chunks = chunk_text(text)
+        if not doc_id or not url:
+            continue
+            
+        print(f"Checking document source: {doc_id}...")
         
-        # Generate embeddings (embedder)
-        embeddings = generate_embeddings(chunks)
+        # Fetch latest document
+        latest_doc = fetch_document_content(doc_id, url)
+        new_hash = latest_doc.get("content_hash")
         
-        # Replace vectors in FAISS
-        replace_vectors_in_faiss(doc_id, embeddings)
+        if new_hash == "error":
+            continue
         
-        # Update Mongo metadata
-        update_mongo_metadata(doc_id, new_hash)
-        print("Pipeline execution completed successfully.")
-    else:
-        # Do nothing
-        print(f"Document {doc_id} has not changed. Skipping processing.")
+        # Check if changed (hash/version compare)
+        stored_hash = get_stored_document_hash(doc_id)
+        
+        if new_hash != stored_hash:
+            print(f"Document {doc_id} has changed. Processing pipeline...")
+            
+            # Extract text (loader)
+            text = extract_text(latest_doc)
+            
+            # Create chunks AND store them in Mongo (chunker)
+            from ingest.chunker import chunk_and_store
+            chunk_and_store(doc_id=doc_id, text=text)
+            
+            # Generate vectors & store in Mongo (embedder)
+            from ingest.embedder import embed_and_update_chunks
+            embed_and_update_chunks(doc_id=doc_id)
+            
+            # Sync these new vectors straight to FAISS
+            chunk_docs = list(db["chunks"].find({"doc_id": doc_id}).sort("chunk_index", 1))
+            embeddings = [d["embedding"] for d in chunk_docs if d.get("embedding")]
+            
+            from services.retrieval import replace_vectors_in_faiss
+            replace_vectors_in_faiss(doc_id, embeddings)
+            
+            # Update Mongo metadata
+            update_mongo_metadata(doc_id, new_hash)
+            print(f"Pipeline execution for {doc_id} completed successfully.")
+        else:
+            # Do nothing
+            print(f"Document {doc_id} has not changed. Skipping processing.")
+            
+    print("Global Pipeline checking cycle finished.")
 
 def start_scheduler():
     """Start the scheduler to run the pipeline periodically."""
-    # For example, run every hour
-    schedule.every(1).hours.do(process_pipeline)
-    print("Scheduler started...")
+    # Run every Sunday at 2:00 AM
+    schedule.every().sunday.at("02:00").do(process_pipeline)
+    print("Scheduler started. Pipeline will run every Sunday at 02:00 AM.")
     
-    # while True:
-    #     schedule.run_pending()
-    #     time.sleep(1)
+    while True:
+        schedule.run_pending()
+        time.sleep(60) # Check every minute
 
 if __name__ == "__main__":
     # Test the pipeline execution once directly
-    process_pipeline()
+    # process_pipeline()
+    start_scheduler()
