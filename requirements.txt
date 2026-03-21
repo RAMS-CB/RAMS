@@ -1,0 +1,11 @@
+beautifulsoup4==4.14.3
+faiss-cpu==1.13.2
+fastapi==0.133.1
+numpy
+pydantic
+pymongo==4.16.0
+python-dotenv
+requests
+schedule==1.2.2
+sentence-transformers==5.2.3
+uvicorn==0.41.0
