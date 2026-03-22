@@ -126,7 +126,6 @@ async def create_chunks(request: ChunkRequest):
     try:
         if request.store:
             from ingest.chunker import chunk_and_store
-            from ingest.embedder import embed_and_update_chunks
             
             inserted_ids = chunk_and_store(
                 doc_id=request.doc_id, 
