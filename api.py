@@ -15,6 +15,46 @@ app = FastAPI(
     version="1.0.0"
 )
 
+import requests
+import threading
+import logging
+
+def trigger_github_action(event_type: str):
+    """
+    Triggers a GitHub repository dispatch event to start a GitHub Actions workflow.
+    Requires GITHUB_TOKEN and GITHUB_REPO environment variables.
+    """
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_repo = os.getenv("GITHUB_REPO") # e.g., "username/repo"
+    
+    if not github_token or not github_repo:
+        logging.warning("GITHUB_TOKEN or GITHUB_REPO not set. Skipping GitHub Action trigger.")
+        return
+
+    url = f"https://api.github.com/repos/{github_repo}/dispatches"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {github_token}"
+    }
+    payload = {"event_type": event_type}
+    
+    try:
+        # Run asynchronously so it doesn't block the API response
+        def send_request():
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=5)
+                if response.status_code == 204:
+                    logging.info(f"Successfully triggered GitHub Action: {event_type}")
+                else:
+                    logging.error(f"Failed to trigger GitHub Action: {response.text}")
+            except Exception as e:
+                logging.error(f"Error triggering GitHub Action: {e}")
+                
+        thread = threading.Thread(target=send_request)
+        thread.start()
+    except Exception as e:
+        logging.error(f"Could not start thread to trigger GitHub Action: {e}")
+
 import threading
 
 # Startup event to ensure database connection is ready
@@ -95,14 +135,13 @@ async def create_chunks(request: ChunkRequest):
                 overlap=request.overlap
             )
             
-            # Automatically embed if store=True
-            embeddings_count = embed_and_update_chunks(doc_id=request.doc_id)
+            # Trigger GitHub Action to generate embeddings
+            trigger_github_action("embed_chunks")
             
             return {
-                "message": "Chunks created, stored, and embedded successfully",
+                "message": "Chunks created, stored, and sent to GitHub Actions for embedding",
                 "doc_id": request.doc_id,
                 "chunk_count": len(inserted_ids),
-                "embeddings_generated": embeddings_count,
                 "inserted_ids": inserted_ids
             }
         else:
@@ -127,14 +166,12 @@ async def generate_embeddings_endpoint(request: EmbedRequest):
         raise HTTPException(status_code=400, detail="doc_id cannot be empty")
         
     try:
-        from ingest.embedder import embed_and_update_chunks
-        
-        updated_count = embed_and_update_chunks(doc_id=request.doc_id)
+        # Trigger GitHub Action to generate embeddings for missing chunks
+        trigger_github_action("embed_chunks")
         
         return {
-            "message": "Embeddings generated and updated successfully",
+            "message": "GitHub Action triggered successfully to generate embeddings",
             "doc_id": request.doc_id,
-            "embeddings_generated": updated_count
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -231,7 +268,5 @@ async def delete_document_source(doc_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    # Render and other hosting providers set the PORT environment variable.
-    # Default to 8000 for local development if PORT is not set.
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("api:app", host="0.0.0.0", port=port)
+    # Make sure this runs on a different port or the same port depending on your needs.
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

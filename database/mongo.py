@@ -12,9 +12,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Assuming the following folder structure is used to import modules for the pipeline:
 from ingest.loader import extract_text
 # from ingest.chunker import chunk_text
-from ingest.embedder import generate_embeddings
 from services.retrieval import replace_vectors_in_faiss
 from database.mongo_connection import get_db_connection
+from api import trigger_github_action
 
 
 
@@ -122,20 +122,12 @@ def process_pipeline():
             from ingest.chunker import chunk_and_store
             chunk_and_store(doc_id=doc_id, text=text)
             
-            # Generate vectors & store in Mongo (embedder)
-            from ingest.embedder import embed_and_update_chunks
-            embed_and_update_chunks(doc_id=doc_id)
-            
-            # Sync these new vectors straight to FAISS
-            chunk_docs = list(db["chunks"].find({"doc_id": doc_id}).sort("chunk_index", 1))
-            embeddings = [d["embedding"] for d in chunk_docs if d.get("embedding")]
-            
-            from services.retrieval import replace_vectors_in_faiss
-            replace_vectors_in_faiss(doc_id, embeddings)
+            # Trigger GitHub Action to generate embeddings in the background
+            trigger_github_action("embed_chunks")
             
             # Update Mongo metadata
             update_mongo_metadata(doc_id, new_hash)
-            print(f"Pipeline execution for {doc_id} completed successfully.")
+            print(f"Pipeline execution for {doc_id} initiated and sent to GitHub Actions.")
         else:
             # Do nothing
             print(f"Document {doc_id} has not changed. Skipping processing.")

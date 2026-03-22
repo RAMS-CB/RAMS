@@ -1,0 +1,37 @@
+name: Embed Document Chunks
+
+on:
+  schedule:
+    # Run periodically as a fallback, every Sunday at 2:00 AM
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    # Allow manual triggering from the GitHub UI
+  repository_dispatch:
+    # Trigger from incoming webhook (e.g. from the API)
+    types: [embed_chunks]
+
+jobs:
+  embed:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-embedder.txt
+          
+      - name: Run Background Embedder
+        env:
+          MONGO_ID: ${{ secrets.MONGO_ID }}
+          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+        run: |
+          python scripts/run_embedder.py
