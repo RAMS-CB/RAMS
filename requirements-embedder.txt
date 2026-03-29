@@ -2,3 +2,4 @@ sentence-transformers==5.2.3
 pymongo==4.16.0
 python-dotenv
 requests
+pydantic
