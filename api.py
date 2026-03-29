@@ -221,7 +221,32 @@ async def add_document_source(request: DocSourceRequest):
             }},
             upsert=True
         )
-        return {"message": "Document source added/updated successfully", "doc_id": request.doc_id}
+        
+        # Run the extraction, chunking, and action trigger in the background
+        import threading
+        def process_new_url_bg():
+            try:
+                from database.mongo import fetch_document_content, update_mongo_metadata
+                from ingest.loader import extract_text
+                from ingest.chunker import chunk_and_store
+                
+                print(f"Background processing immediately started for new URL: {request.url}")
+                latest_doc = fetch_document_content(request.doc_id, request.url)
+                new_hash = latest_doc.get("content_hash")
+                
+                if new_hash != "error":
+                    text = extract_text(latest_doc)
+                    chunk_and_store(doc_id=request.doc_id, text=text)
+                    trigger_github_action("embed_chunks")
+                    update_mongo_metadata(request.doc_id, new_hash)
+                    print(f"Successfully processed {request.doc_id} and triggered embedding!")
+            except Exception as bg_e:
+                print(f"Error during background processing of {request.doc_id}: {bg_e}")
+        
+        thread = threading.Thread(target=process_new_url_bg, daemon=True)
+        thread.start()
+
+        return {"message": "Document source added and immediate processing started in background", "doc_id": request.doc_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
