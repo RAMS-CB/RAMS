@@ -1,6 +1,7 @@
 import os
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import certifi
 
 # Load environment variables
 load_dotenv()
@@ -16,7 +17,8 @@ def get_db_connection():
         raise ValueError("MONGO_ID not found in environment variables. Please check your .env file.")
         
     try:
-        client = MongoClient(mongo_uri)
+        # Use certifi to provide the required root certificates for MongoDB Atlas
+        client = MongoClient(mongo_uri, tlsCAFile=certifi.where())
         # Test the connection
         client.admin.command('ping')
         print("Pinged your deployment. You successfully connected to MongoDB!")

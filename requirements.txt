@@ -4,6 +4,7 @@ fastapi==0.133.1
 numpy
 pydantic
 pymongo==4.16.0
+certifi
 python-dotenv
 requests
 schedule==1.2.2
