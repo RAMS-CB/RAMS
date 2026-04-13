@@ -175,20 +175,6 @@ async def generate_embeddings_endpoint(request: EmbedRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/sync-faiss")
-async def sync_faiss_endpoint():
-    """Bulk backfills FAISS vector DB with all chunks currently stored in MongoDB"""
-    try:
-        from services.retrieval import sync_all_from_mongo
-        docs, chunks = sync_all_from_mongo()
-        return {
-            "message": "Successfully synced MongoDB embeddings to FAISS",
-            "documents_processed": docs,
-            "total_chunks_synced": chunks
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/update-metadata")
 async def update_metadata_endpoint(request: MetadataUpdateRequest):
     """Manually update the metadata (e.g. hash) of a document in MongoDB"""
@@ -263,7 +249,7 @@ async def list_document_sources():
 
 @app.delete("/document-sources/{doc_id}")
 async def delete_document_source(doc_id: str):
-    """Permanently deletes a document link, its metadata, its chunks, and its FAISS embeddings."""
+    """Permanently deletes a document link, its metadata, and its chunks/embeddings."""
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -279,10 +265,6 @@ async def delete_document_source(doc_id: str):
         
         # 3. Remove all MongoDB chunks
         db["chunks"].delete_many({"doc_id": doc_id})
-        
-        # 4. Remove all FAISS vectors
-        from services.retrieval import delete_vectors_from_faiss
-        delete_vectors_from_faiss(doc_id)
         
         return {"message": f"Document '{doc_id}' and all its embeddings/chunks were permanently deleted."}
     except HTTPException:

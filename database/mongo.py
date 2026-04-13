@@ -12,7 +12,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Assuming the following folder structure is used to import modules for the pipeline:
 from ingest.loader import extract_text
 # from ingest.chunker import chunk_text
-from services.retrieval import replace_vectors_in_faiss
 from database.mongo_connection import get_db_connection
 from api import trigger_github_action
 
