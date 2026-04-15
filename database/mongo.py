@@ -19,19 +19,29 @@ from api import trigger_github_action
 
 
 def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
-    """Fetch the document content from its URL to check if it changed."""
+    """Fetch the document content from its URL to check if it changed.
+    Uses Jina Reader API to properly execute JS (for SPAs, Google Docs, OneDrive)
+    and extract clean markdown text."""
     try:
-        response = requests.get(url)
+        # Use Jina Reader to get rendered markdown instead of raw HTML
+        jina_url = f"https://r.jina.ai/{url}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/event-stream" # Jina recommends this or plain get
+        }
+        
+        response = requests.get(jina_url, headers=headers)
         response.raise_for_status()
         
-        # Simple hash of the raw HTML content to detect changes
+        # Simple hash of the extracted Markdown to detect changes
         content_hash = hashlib.md5(response.content).hexdigest()
         
         return {
             "id": doc_id,
             "content_hash": content_hash,
             "url": url,
-            "raw_html": response.text 
+            "raw_html": response.text  # This is actually Markdown now
         }
     except Exception as e:
         print(f"Error fetching document '{doc_id}' at '{url}': {e}")

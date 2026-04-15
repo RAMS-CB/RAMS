@@ -2,6 +2,7 @@ import sys
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import List
 
 # Add the project root to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -13,6 +14,17 @@ app = FastAPI(
     title="RAMS API",
     description="API for the RAMS Document Processing Pipeline",
     version="1.0.0"
+)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+# Enable CORS for the frontend origin and others
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, restrict this to the frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 import requests
@@ -102,6 +114,9 @@ class DocSourceRequest(BaseModel):
     title: str
     doc_id: str
     url: str
+
+class BulkDocSourceRequest(BaseModel):
+    sources: List[DocSourceRequest]
 
 # Example API Route for Retrieval (can connect to services later)
 @app.post("/ask")
@@ -233,6 +248,57 @@ async def add_document_source(request: DocSourceRequest):
         thread.start()
 
         return {"message": "Document source added and immediate processing started in background", "doc_id": request.doc_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/document-sources/bulk")
+async def add_multiple_document_sources(request: BulkDocSourceRequest):
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        db = client["rams_db"]
+        
+        for source in request.sources:
+            db["document_sources"].update_one(
+                {"doc_id": source.doc_id},
+                {"$set": {
+                    "title": source.title,
+                    "url": source.url
+                }},
+                upsert=True
+            )
+            
+        import threading
+        def process_multiple_urls_bg(sources):
+            try:
+                from database.mongo import fetch_document_content, update_mongo_metadata
+                from ingest.loader import extract_text
+                from ingest.chunker import chunk_and_store
+                
+                for source in sources:
+                    print(f"Background processing immediately started for new URL: {source.url}")
+                    latest_doc = fetch_document_content(source.doc_id, source.url)
+                    new_hash = latest_doc.get("content_hash")
+                    
+                    if new_hash != "error":
+                        text = extract_text(latest_doc)
+                        chunk_and_store(doc_id=source.doc_id, text=text)
+                        update_mongo_metadata(source.doc_id, new_hash)
+                        print(f"Successfully processed {source.doc_id}")
+                
+                trigger_github_action("embed_chunks")
+                print("Successfully triggered embedding action for bulk ingest!")
+                
+            except Exception as bg_e:
+                print(f"Error during bulk background processing: {bg_e}")
+                
+        thread = threading.Thread(target=process_multiple_urls_bg, args=(request.sources,), daemon=True)
+        thread.start()
+        
+        return {
+            "message": f"{len(request.sources)} document sources added and bulk processing started", 
+            "doc_ids": [s.doc_id for s in request.sources]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

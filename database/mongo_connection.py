@@ -6,11 +6,18 @@ import certifi
 # Load environment variables
 load_dotenv()
 
+_client = None
+
 def get_db_connection():
     """
     Connects to MongoDB using the MONGO_ID connection string.
-    Returns the MongoClient instance.
+    Returns the cached MongoClient instance to avoid connection exhaustion.
     """
+    global _client
+    
+    if _client is not None:
+        return _client
+        
     mongo_uri = os.getenv("MONGO_ID")
     
     if not mongo_uri:
@@ -18,11 +25,11 @@ def get_db_connection():
         
     try:
         # Use certifi to provide the required root certificates for MongoDB Atlas
-        client = MongoClient(mongo_uri, tlsCAFile=certifi.where())
+        _client = MongoClient(mongo_uri, tlsCAFile=certifi.where())
         # Test the connection
-        client.admin.command('ping')
+        _client.admin.command('ping')
         print("Pinged your deployment. You successfully connected to MongoDB!")
-        return client
+        return _client
     except Exception as e:
         print(f"Failed to connect to MongoDB: {e}")
         raise
