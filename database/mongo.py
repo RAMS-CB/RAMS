@@ -18,30 +18,40 @@ from api import trigger_github_action
 
 
 
+import re
+
 def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
     """Fetch the document content from its URL to check if it changed.
-    Uses Jina Reader API to properly execute JS (for SPAs, Google Docs, OneDrive)
-    and extract clean markdown text."""
+    Uses native Google Docs export, or Jina Reader API to properly execute JS 
+    and extract clean markdown text for generic sites."""
     try:
-        # Use Jina Reader to get rendered markdown instead of raw HTML
-        jina_url = f"https://r.jina.ai/{url}"
-        
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/event-stream" # Jina recommends this or plain get
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         
-        response = requests.get(jina_url, headers=headers)
+        # Check if it's a Google Doc. If so, intercept it!
+        # Google docs render text on a <canvas>, which Jina and scrapers can't read.
+        # But we can forcefully export the raw text:
+        gdoc_match = re.search(r'(docs\.google\.com/document/d/[a-zA-Z0-9_-]+)', url)
+        if gdoc_match:
+            base_url = gdoc_match.group(1)
+            target_url = f"https://{base_url}/export?format=txt"
+            response = requests.get(target_url, headers=headers)
+        else:
+            # For generic urls and SPAs, use Jina Reader for markdown clean-up
+            jina_url = f"https://r.jina.ai/{url}"
+            response = requests.get(jina_url, headers=headers)
+            
         response.raise_for_status()
         
-        # Simple hash of the extracted Markdown to detect changes
+        # Simple hash of the extracted Markdown/text to detect changes
         content_hash = hashlib.md5(response.content).hexdigest()
         
         return {
             "id": doc_id,
             "content_hash": content_hash,
             "url": url,
-            "raw_html": response.text  # This is actually Markdown now
+            "raw_html": response.text  # This is actually clean Text / Markdown now
         }
     except Exception as e:
         print(f"Error fetching document '{doc_id}' at '{url}': {e}")
