@@ -23,38 +23,111 @@ import re
 def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
     """Fetch the document content from its URL to check if it changed.
     Uses native Google Docs export, or Jina Reader API to properly execute JS 
-    and extract clean markdown text for generic sites."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+    and extract clean markdown text for generic sites. Recursively fetches linked documents."""
+    import urllib.parse
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-With-Links-Summary": "true"
+    }
+
+    def clean_google_link(link: str) -> str:
+        if "google.com/url" in link:
+            m = re.search(r'q=([^&]+)', link)
+            if m: return urllib.parse.unquote(m.group(1))
+        return link
+
+    url_to_serial = {}
+    serial_counter = 1
+    seen_urls = set([url])
+    
+    queue = [(url, "Primary Document", 0)]
+    final_content = ""
+    embedded_blocks = []
+    original_gdoc_id = None
+
+    while queue:
+        current_url, linked_text, depth = queue.pop(0)
+        is_primary = (depth == 0)
         
-        # Check if it's a Google Doc. If so, intercept it!
-        # Google docs render text on a <canvas>, which Jina and scrapers can't read.
-        # But we can forcefully export the raw text:
-        gdoc_match = re.search(r'(docs\.google\.com/document/d/[a-zA-Z0-9_-]+)', url)
+        target_jina_url = f"https://r.jina.ai/{current_url}"
+        
+        gdoc_match = re.search(r'(docs\.google\.com/document/d/[a-zA-Z0-9_-]+)', current_url)
         if gdoc_match:
             base_url = gdoc_match.group(1)
-            target_url = f"https://{base_url}/export?format=txt"
-            response = requests.get(target_url, headers=headers)
+            target_jina_url = f"https://r.jina.ai/https://{base_url}/export?format=html"
+            if is_primary:
+                doc_id_match = re.search(r'/document/d/([a-zA-Z0-9_-]+)', current_url)
+                if doc_id_match:
+                    original_gdoc_id = doc_id_match.group(1)
+        
+        if is_primary:
+            print(f"Fetching primary document via Jina: {current_url}")
         else:
-            # For generic urls and SPAs, use Jina Reader for markdown clean-up
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, headers=headers)
+            serial_num = url_to_serial.get(current_url)
+            print(f"Fetching linked document {serial_num} (depth {depth}): {current_url}")
             
-        response.raise_for_status()
-        
-        # Simple hash of the extracted Markdown/text to detect changes
-        content_hash = hashlib.md5(response.content).hexdigest()
-        
+        try:
+            response = requests.get(target_jina_url, headers=headers, timeout=20)
+            if response.status_code != 200:
+                print(f"Failed to fetch {current_url} (HTTP {response.status_code})")
+                continue
+            
+            content = response.text
+            links = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
+            
+            # Map valid links and safely replace inline markdown
+            for text, raw_link in links:
+                clean_link = clean_google_link(raw_link)
+                
+                # Exclude self-references and loops to the original google doc anchor links
+                if clean_link == current_url:
+                    continue
+                if original_gdoc_id and original_gdoc_id in clean_link:
+                    continue
+                if clean_link.startswith("https://r.jina.ai") or not clean_link.startswith("http"):
+                    continue
+                    
+                if clean_link not in url_to_serial:
+                    url_to_serial[clean_link] = serial_counter
+                    serial_counter += 1
+                    
+                    if clean_link not in seen_urls:
+                        seen_urls.add(clean_link)
+                        queue.append((clean_link, text, depth + 1))
+                        
+                # Update markdown correctly in text
+                serial = url_to_serial[clean_link]
+                original_markdown = f"[{text}]({raw_link})"
+                new_markdown = f"[[{serial}] {text}]({raw_link})"
+                content = content.replace(original_markdown, new_markdown)
+                
+            if is_primary:
+                final_content += content
+            else:
+                serial_num = url_to_serial.get(current_url, 999)
+                embedded_blocks.append((serial_num, current_url, content))
+                
+        except Exception as e:
+            print(f"Error fetching {current_url}: {e}")
+            continue
+
+    if embedded_blocks:
+        final_content += "\n\n# Embedded Documents\n\n"
+        embedded_blocks.sort(key=lambda x: x[0])
+        for serial_num, block_url, block_content in embedded_blocks:
+            final_content += f"## Serial Number {serial_num}: {block_url}\n\n"
+            final_content += block_content + "\n\n"
+
+    try:
+        content_hash = hashlib.md5(final_content.encode('utf-8', errors='ignore')).hexdigest()
         return {
             "id": doc_id,
             "content_hash": content_hash,
             "url": url,
-            "raw_html": response.text  # This is actually clean Text / Markdown now
+            "raw_html": final_content
         }
-    except Exception as e:
-        print(f"Error fetching document '{doc_id}' at '{url}': {e}")
+    except Exception as hash_e:
+        print(f"Error finalizing document '{doc_id}': {hash_e}")
         return {
             "id": doc_id,
             "content_hash": "error",
