@@ -13,7 +13,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ingest.loader import extract_text
 # from ingest.chunker import chunk_text
 from database.mongo_connection import get_db_connection
-from api import trigger_github_action
+# NOTE: trigger_github_action is imported lazily inside process_pipeline()
+# to avoid a circular import (mongo.py <-> api.py).
 
 
 
@@ -215,6 +216,7 @@ def process_pipeline():
             chunk_and_store(doc_id=doc_id, text=text)
             
             # Trigger GitHub Action to generate embeddings in the background
+            from api import trigger_github_action
             trigger_github_action("embed_chunks")
             
             # Update Mongo metadata
