@@ -225,24 +225,46 @@ async def add_document_source(request: DocSourceRequest):
         
         # Run the extraction, chunking, and action trigger in the background
         import threading
+        import traceback
+        import sys
         def process_new_url_bg():
             try:
+                print(f"[BG-THREAD] Step 1: Starting background processing for {request.doc_id} ({request.url})", flush=True)
+                
                 from database.mongo import fetch_document_content, update_mongo_metadata
                 from ingest.loader import extract_text
                 from ingest.chunker import chunk_and_store
+                print(f"[BG-THREAD] Step 2: Imports successful", flush=True)
                 
-                print(f"Background processing immediately started for new URL: {request.url}")
                 latest_doc = fetch_document_content(request.doc_id, request.url)
                 new_hash = latest_doc.get("content_hash")
+                raw_html = latest_doc.get("raw_html", "")
+                print(f"[BG-THREAD] Step 3: Fetched document. Hash={new_hash}, Content length={len(raw_html)}", flush=True)
                 
-                if new_hash != "error":
-                    text = extract_text(latest_doc)
-                    chunk_and_store(doc_id=request.doc_id, text=text)
-                    trigger_github_action("embed_chunks")
-                    update_mongo_metadata(request.doc_id, new_hash)
-                    print(f"Successfully processed {request.doc_id} and triggered embedding!")
+                if new_hash == "error":
+                    print(f"[BG-THREAD] ABORT: fetch_document_content returned error hash for {request.doc_id}", flush=True)
+                    return
+                
+                text = extract_text(latest_doc)
+                print(f"[BG-THREAD] Step 4: Extracted text. Length={len(text)}", flush=True)
+                
+                if not text or not text.strip():
+                    print(f"[BG-THREAD] ABORT: Extracted text is empty for {request.doc_id}", flush=True)
+                    return
+                
+                inserted_ids = chunk_and_store(doc_id=request.doc_id, text=text)
+                print(f"[BG-THREAD] Step 5: Chunking done. {len(inserted_ids)} chunks stored", flush=True)
+                
+                trigger_github_action("embed_chunks")
+                print(f"[BG-THREAD] Step 6: GitHub Action triggered", flush=True)
+                
+                update_mongo_metadata(request.doc_id, new_hash)
+                print(f"[BG-THREAD] Step 7: COMPLETE - Successfully processed {request.doc_id}!", flush=True)
+                
             except Exception as bg_e:
-                print(f"Error during background processing of {request.doc_id}: {bg_e}")
+                print(f"[BG-THREAD] EXCEPTION during processing of {request.doc_id}: {bg_e}", flush=True)
+                traceback.print_exc()
+                sys.stdout.flush()
         
         thread = threading.Thread(target=process_new_url_bg, daemon=True)
         thread.start()
