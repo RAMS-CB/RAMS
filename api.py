@@ -208,7 +208,7 @@ async def update_metadata_endpoint(request: MetadataUpdateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/document-sources")
+@app.api_route("/document-sources", methods=["POST", "PUT"])
 async def add_document_source(request: DocSourceRequest):
     try:
         from database.mongo_connection import get_db_connection
