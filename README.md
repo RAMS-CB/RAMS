@@ -16,7 +16,7 @@ Chunk creation and document ingestion now start Gemini embedding jobs locally, s
 the GitHub Actions embedder workflow and the separate sentence-transformers
 dependency file are no longer needed.
 
-To replace all existing sentence-transformer embeddings with Gemini embeddings,
+To replace all existing sentence-transformer embeddings with Gemini embeddings (overwrite all),
 run:
 
 ```bash
@@ -28,3 +28,11 @@ Or call `POST /embed/all` with:
 ```json
 {"force": true}
 ```
+
+To **only** generate embeddings for new chunks that are currently missing them, run the separate script:
+
+```bash
+python scripts/embed_missing.py
+```
+
+Or call the dedicated endpoint on the deployed version: `POST /embed/missing`.

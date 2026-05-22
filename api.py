@@ -184,6 +184,18 @@ async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/embed/missing")
+async def generate_missing_embeddings_endpoint():
+    """Trigger background job to embed only chunks that don't have embeddings yet."""
+    try:
+        start_embedding_job(force=False)
+        return {
+            "message": "Gemini embedding backfill job (missing only) started successfully",
+            "force": False,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/update-metadata")
 async def update_metadata_endpoint(request: MetadataUpdateRequest):
     """Manually update the metadata (e.g. hash) of a document in MongoDB"""
