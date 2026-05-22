@@ -2,7 +2,7 @@ import sys
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 # Add the project root to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -27,47 +27,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import requests
 import threading
 import logging
 
-def trigger_github_action(event_type: str):
-    """
-    Triggers a GitHub repository dispatch event to start a GitHub Actions workflow.
-    Requires GITHUB_TOKEN and GITHUB_REPO environment variables.
-    """
-    github_token = os.getenv("GITHUB_TOKEN")
-    github_repo = os.getenv("GITHUB_REPO") # e.g., "username/repo"
-    
-    if not github_token or not github_repo:
-        logging.warning("GITHUB_TOKEN or GITHUB_REPO not set. Skipping GitHub Action trigger.")
-        return
+def start_embedding_job(doc_id: Optional[str] = None, force: bool = False):
+    """Generate missing Gemini embeddings in a background thread."""
+    def run_job():
+        try:
+            from ingest.embedder import embed_and_update_all, embed_and_update_chunks
 
-    url = f"https://api.github.com/repos/{github_repo}/dispatches"
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "Authorization": f"token {github_token}"
-    }
-    payload = {"event_type": event_type}
-    
-    try:
-        # Run asynchronously so it doesn't block the API response
-        def send_request():
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=5)
-                if response.status_code == 204:
-                    logging.info(f"Successfully triggered GitHub Action: {event_type}")
-                else:
-                    logging.error(f"Failed to trigger GitHub Action: {response.text}")
-            except Exception as e:
-                logging.error(f"Error triggering GitHub Action: {e}")
-                
-        thread = threading.Thread(target=send_request)
-        thread.start()
-    except Exception as e:
-        logging.error(f"Could not start thread to trigger GitHub Action: {e}")
+            if doc_id:
+                updated = embed_and_update_chunks(doc_id)
+                logging.info("Gemini embedding job completed for %s: %s chunk(s)", doc_id, updated)
+            else:
+                updated = embed_and_update_all(force=force)
+                logging.info("Gemini embedding job completed: %s chunk(s)", updated)
+        except Exception as e:
+            logging.exception("Gemini embedding job failed: %s", e)
 
-import threading
+    thread = threading.Thread(target=run_job, daemon=True)
+    thread.start()
+    return thread
 
 # Startup event to ensure database connection is ready
 @app.on_event("startup")
@@ -105,6 +85,9 @@ class ChunkRequest(BaseModel):
 
 class EmbedRequest(BaseModel):
     doc_id: str
+
+class EmbedAllRequest(BaseModel):
+    force: bool = False
 
 class MetadataUpdateRequest(BaseModel):
     doc_id: str
@@ -149,11 +132,10 @@ async def create_chunks(request: ChunkRequest):
                 overlap=request.overlap
             )
             
-            # Trigger GitHub Action to generate embeddings
-            trigger_github_action("embed_chunks")
+            start_embedding_job(request.doc_id)
             
             return {
-                "message": "Chunks created, stored, and sent to GitHub Actions for embedding",
+                "message": "Chunks created, stored, and queued for Gemini embedding",
                 "doc_id": request.doc_id,
                 "chunk_count": len(inserted_ids),
                 "inserted_ids": inserted_ids
@@ -180,12 +162,24 @@ async def generate_embeddings_endpoint(request: EmbedRequest):
         raise HTTPException(status_code=400, detail="doc_id cannot be empty")
         
     try:
-        # Trigger GitHub Action to generate embeddings for missing chunks
-        trigger_github_action("embed_chunks")
+        start_embedding_job(request.doc_id)
         
         return {
-            "message": "GitHub Action triggered successfully to generate embeddings",
+            "message": "Gemini embedding job started successfully",
             "doc_id": request.doc_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/embed/all")
+async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
+    try:
+        start_embedding_job(force=request.force)
+        action = "full Gemini re-embedding" if request.force else "Gemini embedding backfill"
+
+        return {
+            "message": f"{action} job started successfully",
+            "force": request.force,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -255,8 +249,9 @@ async def add_document_source(request: DocSourceRequest):
                 inserted_ids = chunk_and_store(doc_id=request.doc_id, text=text)
                 print(f"[BG-THREAD] Step 5: Chunking done. {len(inserted_ids)} chunks stored", flush=True)
                 
-                trigger_github_action("embed_chunks")
-                print(f"[BG-THREAD] Step 6: GitHub Action triggered", flush=True)
+                from ingest.embedder import embed_and_update_chunks
+                embedded_count = embed_and_update_chunks(request.doc_id)
+                print(f"[BG-THREAD] Step 6: Gemini embeddings updated for {embedded_count} chunks", flush=True)
                 
                 update_mongo_metadata(request.doc_id, new_hash)
                 print(f"[BG-THREAD] Step 7: COMPLETE - Successfully processed {request.doc_id}!", flush=True)
@@ -308,8 +303,9 @@ async def add_multiple_document_sources(request: BulkDocSourceRequest):
                         update_mongo_metadata(source.doc_id, new_hash)
                         print(f"Successfully processed {source.doc_id}")
                 
-                trigger_github_action("embed_chunks")
-                print("Successfully triggered embedding action for bulk ingest!")
+                from ingest.embedder import embed_and_update_all
+                embedded_count = embed_and_update_all()
+                print(f"Successfully updated Gemini embeddings for {embedded_count} chunk(s)!")
                 
             except Exception as bg_e:
                 print(f"Error during bulk background processing: {bg_e}")

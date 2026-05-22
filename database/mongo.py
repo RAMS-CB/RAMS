@@ -13,8 +13,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ingest.loader import extract_text
 # from ingest.chunker import chunk_text
 from database.mongo_connection import get_db_connection
-# NOTE: trigger_github_action is imported lazily inside process_pipeline()
-# to avoid a circular import (mongo.py <-> api.py).
 
 
 
@@ -215,13 +213,13 @@ def process_pipeline():
             from ingest.chunker import chunk_and_store
             chunk_and_store(doc_id=doc_id, text=text)
             
-            # Trigger GitHub Action to generate embeddings in the background
-            from api import trigger_github_action
-            trigger_github_action("embed_chunks")
+            # Generate embeddings directly with Gemini.
+            from ingest.embedder import embed_and_update_chunks
+            embedded_count = embed_and_update_chunks(doc_id)
             
             # Update Mongo metadata
             update_mongo_metadata(doc_id, new_hash)
-            print(f"Pipeline execution for {doc_id} initiated and sent to GitHub Actions.")
+            print(f"Pipeline execution for {doc_id} completed with {embedded_count} embedded chunk(s).")
         else:
             # Do nothing
             print(f"Document {doc_id} has not changed. Skipping processing.")

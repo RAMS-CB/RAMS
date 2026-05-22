@@ -1,80 +1,117 @@
 import os
-import importlib.util
+import math
+import time
 from typing import List, Optional
 
-from sentence_transformers import SentenceTransformer
+from google import genai
+from google.genai import types
+
 from database.mongo_connection import get_db_connection
 
-# ── Load ChunkModel by file path (filename has no dots now but kept
-#    consistent with chunker.py's import style) ──────────────────────
-_model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "models", "chunk_model.py")
-_spec = importlib.util.spec_from_file_location("chunk_model", _model_path)
-_chunk_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_chunk_mod)
-ChunkModel = _chunk_mod.ChunkModel
 
-
-# ── Configuration ───────────────────────────────────────────────────
-DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"   # lightweight, 384-dim embeddings
+DEFAULT_MODEL_NAME = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+DEFAULT_OUTPUT_DIMENSIONALITY = int(os.getenv("GEMINI_EMBEDDING_DIMENSIONS", "384"))
+DEFAULT_BATCH_SIZE = int(os.getenv("GEMINI_EMBEDDING_BATCH_SIZE", "32"))
+DEFAULT_REQUEST_DELAY_SECONDS = float(os.getenv("GEMINI_EMBEDDING_REQUEST_DELAY_SECONDS", "0"))
+NORMALIZE_TRUNCATED_GEMINI_001 = os.getenv("GEMINI_NORMALIZE_TRUNCATED_001", "true").lower() != "false"
 DB_NAME = "rams_db"
 COLLECTION_NAME = "chunks"
 
-# Module-level cache so the model is loaded only once per process
-_model_cache: dict = {}
+_client_cache: Optional[genai.Client] = None
 
 
-def get_model(model_name: str = DEFAULT_MODEL_NAME) -> SentenceTransformer:
-    """
-    Return a cached SentenceTransformer model.
-    Loads the model on first call; subsequent calls reuse the instance.
-    """
-    if model_name not in _model_cache:
-        print(f"Loading embedding model '{model_name}'...")
-        _model_cache[model_name] = SentenceTransformer(model_name)
-        print("Model loaded.")
-    return _model_cache[model_name]
+def get_client() -> genai.Client:
+    """Return a cached Gemini client configured from GEMINI_API_KEY."""
+    global _client_cache
+
+    if _client_cache is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not found in environment variables.")
+        _client_cache = genai.Client(api_key=api_key)
+
+    return _client_cache
 
 
-# ── Reusable core function ──────────────────────────────────────────
+def _embedding_values(embedding) -> List[float]:
+    values = getattr(embedding, "values", None)
+    if values is None and isinstance(embedding, dict):
+        values = embedding.get("values")
+    if values is None:
+        raise ValueError("Gemini embedding response did not include values.")
+    return [float(value) for value in values]
+
+
+def _normalize(vector: List[float]) -> List[float]:
+    magnitude = math.sqrt(sum(value * value for value in vector))
+    if magnitude == 0:
+        return vector
+    return [value / magnitude for value in vector]
+
 
 def generate_embeddings(
     texts: List[str],
     model_name: str = DEFAULT_MODEL_NAME,
-    batch_size: int = 32,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     show_progress: bool = False,
+    task_type: str = "RETRIEVAL_DOCUMENT",
+    output_dimensionality: int = DEFAULT_OUTPUT_DIMENSIONALITY,
 ) -> List[List[float]]:
     """
-    Generate vector embeddings for a list of text strings.
+    Generate Gemini embedding vectors for a list of text strings.
 
-    This is the **reusable** function you can import anywhere:
-        from ingest.embedder import generate_embeddings
-        vectors = generate_embeddings(["hello world", "another sentence"])
-
-    Args:
-        texts:          List of strings to embed.
-        model_name:     HuggingFace model identifier (default: all-MiniLM-L6-v2).
-        batch_size:     Batch size for encoding.
-        show_progress:  Show a progress bar during encoding.
-
-    Returns:
-        List of embedding vectors (each a list of floats).
+    The default output dimensionality is 384 to match the previous
+    all-MiniLM-L6-v2 vectors and avoid requiring a MongoDB vector index rebuild.
+    Set GEMINI_EMBEDDING_DIMENSIONS if your Atlas vector index uses another size.
     """
     if not texts:
         return []
 
-    model = get_model(model_name)
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=show_progress,
-        convert_to_numpy=True,
-    )
-    # Convert numpy arrays → plain Python lists for JSON / MongoDB compatibility
-    return [vec.tolist() for vec in embeddings]
+    client = get_client()
+    vectors: List[List[float]] = []
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        response = client.models.embed_content(
+            model=model_name,
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=output_dimensionality,
+            ),
+        )
+        batch_vectors = [_embedding_values(embedding) for embedding in response.embeddings]
+        if (
+            NORMALIZE_TRUNCATED_GEMINI_001
+            and model_name == "gemini-embedding-001"
+            and output_dimensionality != 3072
+        ):
+            batch_vectors = [_normalize(vector) for vector in batch_vectors]
+        vectors.extend(batch_vectors)
+
+        if show_progress:
+            print(f"Embedded {min(start + len(batch), len(texts))}/{len(texts)} text(s).")
+
+        if DEFAULT_REQUEST_DELAY_SECONDS and start + batch_size < len(texts):
+            time.sleep(DEFAULT_REQUEST_DELAY_SECONDS)
+
+    return vectors
 
 
-# ── MongoDB helpers ─────────────────────────────────────────────────
+def generate_query_embedding(
+    query: str,
+    model_name: str = DEFAULT_MODEL_NAME,
+    output_dimensionality: int = DEFAULT_OUTPUT_DIMENSIONALITY,
+) -> List[float]:
+    """Generate a Gemini embedding optimized for retrieval queries."""
+    return generate_embeddings(
+        [query],
+        model_name=model_name,
+        batch_size=1,
+        task_type="RETRIEVAL_QUERY",
+        output_dimensionality=output_dimensionality,
+    )[0]
+
 
 def _get_collection():
     """Return the MongoDB chunks collection."""
@@ -86,31 +123,24 @@ def _get_collection():
 def embed_and_update_chunks(
     doc_id: str,
     model_name: str = DEFAULT_MODEL_NAME,
-    batch_size: int = 32,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     """
-    Fetch all chunks for *doc_id* from MongoDB, generate embeddings,
-    and update each chunk document with its embedding vector.
+    Fetch all chunks for doc_id from MongoDB, generate embeddings, and update them.
 
     Returns the number of chunks updated.
     """
     collection = _get_collection()
-
-    # 1. Fetch chunks ordered by chunk_index
-    cursor = collection.find({"doc_id": doc_id}).sort("chunk_index", 1)
-    chunks = list(cursor)
+    chunks = list(collection.find({"doc_id": doc_id}).sort("chunk_index", 1))
 
     if not chunks:
         print(f"No chunks found for doc '{doc_id}'.")
         return 0
 
-    texts = [c["text_content"] for c in chunks]
-    print(f"Generating embeddings for {len(texts)} chunk(s) of doc '{doc_id}'...")
-
-    # 2. Generate embeddings in one batch
+    texts = [chunk["text_content"] for chunk in chunks]
+    print(f"Generating Gemini embeddings for {len(texts)} chunk(s) of doc '{doc_id}'...")
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
-    # 3. Update each chunk document with its embedding
     updated = 0
     for chunk_doc, embedding in zip(chunks, embeddings):
         collection.update_one(
@@ -119,35 +149,36 @@ def embed_and_update_chunks(
         )
         updated += 1
 
-    print(f"Updated {updated} chunk(s) with embeddings for doc '{doc_id}'.")
+    print(f"Updated {updated} chunk(s) with Gemini embeddings for doc '{doc_id}'.")
     return updated
 
 
 def embed_and_update_all(
     model_name: str = DEFAULT_MODEL_NAME,
-    batch_size: int = 64,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    force: bool = False,
 ) -> int:
     """
-    Find every chunk that has no embedding yet and generate + store one.
-    Useful as a bulk back-fill operation.
+    Generate + store embeddings for chunks.
+
+    By default this only targets chunks missing an embedding. Set force=True to
+    overwrite every stored embedding, which is useful when changing providers.
 
     Returns the total number of chunks updated.
     """
     collection = _get_collection()
+    query = {} if force else {"$or": [{"embedding": None}, {"embedding": {"$exists": False}}]}
+    chunks = list(
+        collection.find(query).sort([("doc_id", 1), ("chunk_index", 1)])
+    )
 
-    # Only target chunks missing an embedding
-    cursor = collection.find(
-        {"$or": [{"embedding": None}, {"embedding": {"$exists": False}}]}
-    ).sort("doc_id", 1)
-
-    chunks = list(cursor)
     if not chunks:
-        print("All chunks already have embeddings.")
+        print("No chunks found to embed." if force else "All chunks already have embeddings.")
         return 0
 
-    texts = [c["text_content"] for c in chunks]
-    print(f"Back-filling embeddings for {len(texts)} chunk(s)...")
-
+    texts = [chunk["text_content"] for chunk in chunks]
+    action = "Re-embedding" if force else "Back-filling"
+    print(f"{action} Gemini embeddings for {len(texts)} chunk(s)...")
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
     updated = 0
@@ -158,23 +189,16 @@ def embed_and_update_all(
         )
         updated += 1
 
-    print(f"Back-filled {updated} chunk(s) with embeddings.")
+    print(f"{action} complete for {updated} chunk(s).")
     return updated
 
 
-# ── Quick local test ─────────────────────────────────────────────────
 if __name__ == "__main__":
-    # ── Test the reusable function standalone ──
     sample_texts = [
         "RAMS is a Retrieval-Augmented Management System.",
         "It fetches documents and generates embeddings.",
         "Relevant context is used to answer user questions.",
     ]
-    vecs = generate_embeddings(sample_texts)
-    for i, v in enumerate(vecs):
-        print(f"  Text {i}: dim={len(v)}, first 5 values={v[:5]}")
-
-    # ── Test the MongoDB flow (requires chunks in DB) ──
-    # Uncomment the line below if chunks for 'test_doc' already exist:
-    # count = embed_and_update_chunks("test_doc")
-    # print(f"Updated {count} chunks in MongoDB.")
+    vecs = generate_embeddings(sample_texts, show_progress=True)
+    for i, vector in enumerate(vecs):
+        print(f"Text {i}: dim={len(vector)}, first 5 values={vector[:5]}")
