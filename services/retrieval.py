@@ -42,3 +42,13 @@ def search_similar_chunks(query_embedding: List[float], limit: int = 5) -> List[
         print(f"Error executing vector search on MongoDB Atlas: {e}")
         print("Note: Ensure you have manually created the 'vector_index' Vector Search Index in the MongoDB Atlas UI.")
         return []
+
+def retrieve_documents(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Generate an embedding for the text query and perform a vector search.
+    This is the main entry point for the frontend / API.
+    """
+    from ingest.embedder import generate_query_embedding
+    
+    query_embedding = generate_query_embedding(query)
+    return search_similar_chunks(query_embedding, limit=limit)

@@ -101,20 +101,35 @@ class DocSourceRequest(BaseModel):
 class BulkDocSourceRequest(BaseModel):
     sources: List[DocSourceRequest]
 
-# Example API Route for Retrieval (can connect to services later)
+# API Route for Retrieval
 @app.post("/ask")
 async def ask_question(request: QueryRequest):
-    # Here you would typically call services.retrieval and services.llm_service
-    # e.g. answer = process_query(request.query)
-    
-    # Returning a mock response for now
     if not request.query:
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
         
-    return {
-        "question": request.query,
-        "answer": "This is a mock answer. Services not fully connected yet."
-    }
+    try:
+        from services.retrieval import retrieve_documents
+        
+        # 1. Retrieve relevant chunks from the database
+        chunks = retrieve_documents(request.query)
+        
+        # 2. Extract out the actual text and scores to send to the frontend
+        context_snippets = [
+            {
+                "text": chunk.get("text_content", ""), 
+                "score": chunk.get("score", 0), 
+                "doc_id": chunk.get("doc_id", "unknown")
+            } 
+            for chunk in chunks
+        ]
+        
+        return {
+            "question": request.query,
+            "answer": "Context retrieved successfully! (LLM generation not yet hooked up)",
+            "context": context_snippets
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chunk")
 async def create_chunks(request: ChunkRequest):

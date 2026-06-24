@@ -1,5 +1,5 @@
 beautifulsoup4==4.14.3
-fastapi==0.133.1
+fastapi
 numpy
 pydantic
 pymongo==4.16.0
@@ -9,4 +9,4 @@ python-dotenv
 requests
 schedule==1.2.2
 
-uvicorn==0.41.0
+uvicorn
