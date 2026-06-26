@@ -25,9 +25,9 @@ Question:
 {query}"""
 
     try:
-        # We use gemini-1.5-flash as the fast and reliable flash model.
+        # We use an available flash model.
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
         )
         return response.text
