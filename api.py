@@ -109,6 +109,7 @@ async def ask_question(request: QueryRequest):
         
     try:
         from services.retrieval import retrieve_documents
+        from services.llm_service import generate_answer
         
         # 1. Retrieve relevant chunks from the database
         chunks = retrieve_documents(request.query)
@@ -123,9 +124,12 @@ async def ask_question(request: QueryRequest):
             for chunk in chunks
         ]
         
+        # 3. Generate answer using Gemini Flash based on the retrieved context
+        final_answer = generate_answer(request.query, chunks)
+        
         return {
             "question": request.query,
-            "answer": "Context retrieved successfully! (LLM generation not yet hooked up)",
+            "answer": final_answer,
             "context": context_snippets
         }
     except Exception as e:
