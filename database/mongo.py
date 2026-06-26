@@ -22,7 +22,7 @@ import re
 def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
     """Fetch the document content from its URL to check if it changed.
     Uses native Google Docs export, or Jina Reader API to properly execute JS 
-    and extract clean markdown text for generic sites. Recursively fetches linked documents."""
+    and extract clean markdown text for generic sites. Recursively fetches linked documents up to depth 1, max 10 documents."""
     import urllib.parse
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -40,20 +40,55 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
         
         # Strip URL fragments to prevent crawling the same page for different sections
         link = link.split('#')[0]
+        
+        # Normalize Google Docs URLs by stripping query parameters and formatting them consistently
+        gdoc_m = re.search(r'(docs\.google\.com/document/(?:u/\d+/)?d/(?:e/)?([a-zA-Z0-9_-]+))', link)
+        if gdoc_m:
+            gdoc_id = gdoc_m.group(2)
+            if "/pub" in link:
+                link = f"https://docs.google.com/document/d/e/{gdoc_id}/pub"
+            else:
+                link = f"https://docs.google.com/document/d/{gdoc_id}"
+                
         # Strip trailing slashes to normalize URLs
         if link.endswith('/'):
             link = link[:-1]
             
         return link
 
+    def should_crawl_link(link: str) -> bool:
+        # Exclude images, videos, and non-content formats
+        exclude_patterns = [
+            r'\.(png|jpg|jpeg|gif|svg|webp|ico|mp4|avi|mov|mp3|wav|zip|tar|gz|rar|exe|dmg|pkg)$',
+            r'docs-images-rt',
+            r'youtube\.com',
+            r'youtu\.be',
+            r'drive\.google\.com/file',
+            r'google\.com/maps',
+            r'/abuse',
+            r'zohocommerce\.com'
+        ]
+        for pattern in exclude_patterns:
+            if re.search(pattern, link, re.IGNORECASE):
+                return False
+        return True
+
     url_to_serial = {}
     serial_counter = 1
-    seen_urls = set([url])
     
-    queue = [(url, "Primary Document", 0)]
+    cleaned_start_url = clean_google_link(url)
+    seen_urls = set([cleaned_start_url])
+    
+    queue = [(cleaned_start_url, "Primary Document", 0)]
     final_content = ""
     embedded_blocks = []
     original_gdoc_id = None
+
+    # Parse primary Google Doc ID to prevent self-looping
+    primary_gdoc_match = re.search(r'docs\.google\.com/document/(?:u/\d+/)?d/(?:e/)?([a-zA-Z0-9_-]+)', cleaned_start_url)
+    if primary_gdoc_match:
+        original_gdoc_id = primary_gdoc_match.group(1)
+        print(f"Detected primary Google Doc ID: {original_gdoc_id}")
 
     while queue:
         current_url, linked_text, depth = queue.pop(0)
@@ -61,14 +96,14 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
         
         target_jina_url = f"https://r.jina.ai/{current_url}"
         
-        gdoc_match = re.search(r'(docs\.google\.com/document/d/[a-zA-Z0-9_-]+)', current_url)
+        gdoc_match = re.search(r'docs\.google\.com/document/(?:u/\d+/)?d/(?:e/)?([a-zA-Z0-9_-]+)', current_url)
         if gdoc_match:
-            base_url = gdoc_match.group(1)
-            target_jina_url = f"https://r.jina.ai/https://{base_url}/export?format=html"
-            if is_primary:
-                doc_id_match = re.search(r'/document/d/([a-zA-Z0-9_-]+)', current_url)
-                if doc_id_match:
-                    original_gdoc_id = doc_id_match.group(1)
+            gdoc_id = gdoc_match.group(1)
+            if "/pub" in current_url:
+                clean_pub_url = f"https://docs.google.com/document/d/e/{gdoc_id}/pub"
+                target_jina_url = f"https://r.jina.ai/{clean_pub_url}"
+            else:
+                target_jina_url = f"https://r.jina.ai/https://docs.google.com/document/d/{gdoc_id}/export?format=html"
         
         if is_primary:
             print(f"Fetching primary document via Jina: {current_url}")
@@ -85,7 +120,6 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
             content = response.text
             links = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
             
-            # Map valid links and safely replace inline markdown
             for text, raw_link in links:
                 clean_link = clean_google_link(raw_link)
                 
@@ -96,20 +130,23 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
                     continue
                 if clean_link.startswith("https://r.jina.ai") or not clean_link.startswith("http"):
                     continue
-                    
-                if clean_link not in url_to_serial:
-                    url_to_serial[clean_link] = serial_counter
-                    serial_counter += 1
-                    
-                    if clean_link not in seen_urls:
-                        seen_urls.add(clean_link)
-                        queue.append((clean_link, text, depth + 1))
+                
+                # Only queue linked documents if we are at depth 0 (meaning we only crawl depth 1)
+                # and the link passes our validation filters, and we haven't reached the limit of 10.
+                if depth < 1 and clean_link not in seen_urls:
+                    if should_crawl_link(clean_link):
+                        if len(url_to_serial) < 10:
+                            url_to_serial[clean_link] = serial_counter
+                            serial_counter += 1
+                            seen_urls.add(clean_link)
+                            queue.append((clean_link, text, depth + 1))
                         
-                # Update markdown correctly in text
-                serial = url_to_serial[clean_link]
-                original_markdown = f"[{text}]({raw_link})"
-                new_markdown = f"[[{serial}] {text}]({raw_link})"
-                content = content.replace(original_markdown, new_markdown)
+                # Update markdown correctly in text with serial references if it's in our serial map
+                if clean_link in url_to_serial:
+                    serial = url_to_serial[clean_link]
+                    original_markdown = f"[{text}]({raw_link})"
+                    new_markdown = f"[[{serial}] {text}]({raw_link})"
+                    content = content.replace(original_markdown, new_markdown)
                 
             if is_primary:
                 final_content += content

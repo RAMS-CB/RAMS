@@ -72,14 +72,32 @@ def generate_embeddings(
 
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
-        response = client.models.embed_content(
-            model=model_name,
-            contents=batch,
-            config=types.EmbedContentConfig(
-                task_type=task_type,
-                output_dimensionality=output_dimensionality,
-            ),
-        )
+        
+        max_retries = 6
+        retry_delay = 5
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = client.models.embed_content(
+                    model=model_name,
+                    contents=batch,
+                    config=types.EmbedContentConfig(
+                        task_type=task_type,
+                        output_dimensionality=output_dimensionality,
+                    ),
+                )
+                break
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "quota" in str(e).lower():
+                    print(f"Gemini Embedding API rate limited (429). Retrying in {retry_delay}s... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise e
+        
+        if response is None:
+            raise RuntimeError("Failed to generate embeddings after maximum retries due to rate limits.")
+            
         batch_vectors = [_embedding_values(embedding) for embedding in response.embeddings]
         if (
             NORMALIZE_TRUNCATED_GEMINI_001
