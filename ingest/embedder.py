@@ -9,9 +9,9 @@ from google.genai import types
 from database.mongo_connection import get_db_connection
 
 
-DEFAULT_MODEL_NAME = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+DEFAULT_MODEL_NAME = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 DEFAULT_OUTPUT_DIMENSIONALITY = int(os.getenv("GEMINI_EMBEDDING_DIMENSIONS", "384"))
-DEFAULT_BATCH_SIZE = int(os.getenv("GEMINI_EMBEDDING_BATCH_SIZE", "32"))
+DEFAULT_BATCH_SIZE = int(os.getenv("GEMINI_EMBEDDING_BATCH_SIZE", "100"))
 DEFAULT_REQUEST_DELAY_SECONDS = float(os.getenv("GEMINI_EMBEDDING_REQUEST_DELAY_SECONDS", "0"))
 NORMALIZE_TRUNCATED_GEMINI_001 = os.getenv("GEMINI_NORMALIZE_TRUNCATED_001", "true").lower() != "false"
 DB_NAME = "rams_db"
@@ -110,8 +110,9 @@ def generate_embeddings(
         if show_progress:
             print(f"Embedded {min(start + len(batch), len(texts))}/{len(texts)} text(s).")
 
-        if DEFAULT_REQUEST_DELAY_SECONDS and start + batch_size < len(texts):
-            time.sleep(DEFAULT_REQUEST_DELAY_SECONDS)
+        delay = DEFAULT_REQUEST_DELAY_SECONDS if DEFAULT_REQUEST_DELAY_SECONDS > 0 else 1.0
+        if start + batch_size < len(texts):
+            time.sleep(delay)
 
     return vectors
 
