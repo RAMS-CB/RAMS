@@ -28,6 +28,10 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "X-With-Links-Summary": "true"
     }
+    
+    jina_key = os.getenv("JINA_API_KEY")
+    if jina_key:
+        headers["Authorization"] = f"Bearer {jina_key}"
 
     def clean_google_link(link: str) -> str:
         if "google.com/url" in link:
