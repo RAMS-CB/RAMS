@@ -114,22 +114,24 @@ async def ask_question(request: QueryRequest):
         # 1. Retrieve relevant chunks from the database
         chunks = retrieve_documents(request.query)
         
-        # 2. Extract out the actual text and scores to send to the frontend
-        context_snippets = [
-            {
-                "text": chunk.get("text_content", ""), 
-                "score": chunk.get("score", 0), 
-                "doc_id": chunk.get("doc_id", "unknown")
-            } 
-            for chunk in chunks
-        ]
+        # 2. Extract out the actual text and scores to send to the frontend in a readable format
+        formatted_context = []
+        for chunk in chunks:
+            doc_id = chunk.get("doc_id", "unknown")
+            idx = chunk.get("chunk_index", "N/A")
+            score = chunk.get("score", 0.0)
+            text = chunk.get("text_content", "").strip()
+            formatted_context.append(f"--- Doc: {doc_id} | Chunk: {idx} | Score: {score:.3f} ---\n{text}")
+            
+        context_string = "\n\n".join(formatted_context)
         
         # 3. Generate answer using Gemini Flash based on the retrieved context
         final_answer = generate_answer(request.query, chunks)
         
         return {
             "question": request.query,
-            "answer": final_answer
+            "answer": final_answer,
+            "context": context_string
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
