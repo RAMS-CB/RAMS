@@ -32,7 +32,14 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
     def clean_google_link(link: str) -> str:
         if "google.com/url" in link:
             m = re.search(r'q=([^&]+)', link)
-            if m: return urllib.parse.unquote(m.group(1))
+            if m: link = urllib.parse.unquote(m.group(1))
+        
+        # Strip URL fragments to prevent crawling the same page for different sections
+        link = link.split('#')[0]
+        # Strip trailing slashes to normalize URLs
+        if link.endswith('/'):
+            link = link[:-1]
+            
         return link
 
     url_to_serial = {}
