@@ -75,6 +75,7 @@ async def root():
 # Example Request Model
 class QueryRequest(BaseModel):
     query: str
+    model_provider: Optional[str] = "gemini"
 
 class ChunkRequest(BaseModel):
     text: str
@@ -125,8 +126,8 @@ async def ask_question(request: QueryRequest):
             
         context_string = "\n\n".join(formatted_context)
         
-        # 3. Generate answer using Gemini Flash based on the retrieved context
-        final_answer = generate_answer(request.query, chunks)
+        # 3. Generate answer using chosen model based on the retrieved context
+        final_answer = generate_answer(request.query, chunks, request.model_provider)
         
         # Append the formatted context directly to the answer message so it displays in the frontend chat
         final_answer += "\n\n### Retrieved Context Sources\n" + context_string
