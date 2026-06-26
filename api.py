@@ -129,8 +129,7 @@ async def ask_question(request: QueryRequest):
         
         return {
             "question": request.query,
-            "answer": final_answer,
-            "context": context_snippets
+            "answer": final_answer
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -37,10 +37,46 @@ def search_similar_chunks(query_embedding: List[float], limit: int = 5) -> List[
     
     try:
         results = list(collection.aggregate(pipeline))
-        return results
+        if results:
+            return results
     except Exception as e:
         print(f"Error executing vector search on MongoDB Atlas: {e}")
         print("Note: Ensure you have manually created the 'vector_index' Vector Search Index in the MongoDB Atlas UI.")
+        print("Falling back to local cosine similarity computation...")
+
+    # Fallback to local cosine similarity if Vector Search index is not present or returns empty
+    try:
+        import numpy as np
+        query_vec = np.array(query_embedding)
+        chunks = list(collection.find({"embedding": {"$exists": True}}))
+        
+        scored_chunks = []
+        for chunk in chunks:
+            emb = np.array(chunk["embedding"])
+            # Compute cosine similarity
+            norm_q = np.linalg.norm(query_vec)
+            norm_c = np.linalg.norm(emb)
+            if norm_q > 0 and norm_c > 0:
+                sim = np.dot(query_vec, emb) / (norm_q * norm_c)
+            else:
+                sim = 0
+            
+            scored_chunks.append({
+                "doc_id": chunk.get("doc_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "text_content": chunk.get("text_content"),
+                "metadata": chunk.get("metadata"),
+                "score": float(sim)
+            })
+            
+        # Sort by score descending
+        scored_chunks.sort(key=lambda x: x["score"], reverse=True)
+        return scored_chunks[:limit]
+    except ImportError:
+        print("numpy is not installed. Cannot fallback to local cosine similarity.")
+        return []
+    except Exception as e:
+        print(f"Local fallback search failed: {e}")
         return []
 
 def retrieve_documents(query: str, limit: int = 5) -> List[Dict[str, Any]]:
