@@ -128,6 +128,9 @@ async def ask_question(request: QueryRequest):
         # 3. Generate answer using Gemini Flash based on the retrieved context
         final_answer = generate_answer(request.query, chunks)
         
+        # Append the formatted context directly to the answer message so it displays in the frontend chat
+        final_answer += "\n\n### Retrieved Context Sources\n" + context_string
+        
         return {
             "question": request.query,
             "answer": final_answer,
