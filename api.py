@@ -1,8 +1,9 @@
 import sys
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from pydantic import BaseModel
 from typing import List, Optional
+
 
 # Add the project root to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -72,6 +73,188 @@ async def startup_event():
 async def root():
     return {"message": "Welcome to the RAMS API!"}
 
+# Import authentication modules
+from datetime import datetime
+from models.user import (
+    UserCreate, GoogleAuthRequest, LoginRequest, TokenResponse,
+    RefreshTokenRequest, UserResponse, UserRole
+)
+from database.users import (
+    get_user_by_email, get_user_by_username, create_user,
+    update_user_refresh_token, get_user_by_id
+)
+from services.auth import (
+    hash_password, verify_password, hash_refresh_token,
+    create_access_token, create_refresh_token, decode_token,
+    verify_google_token, get_current_user, get_current_admin_user
+)
+
+# Authentication Endpoints
+@app.post("/auth/signup", response_model=UserResponse)
+async def signup(user_in: UserCreate):
+    # Check if user already exists
+    if get_user_by_email(user_in.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    if get_user_by_username(user_in.username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken"
+        )
+        
+    user_dict = {
+        "username": user_in.username,
+        "email": user_in.email,
+        "full_name": user_in.full_name,
+        "hashed_password": hash_password(user_in.password),
+        "role": user_in.role.value,
+        "hashed_refresh_token": None,
+        "created_at": datetime.utcnow()
+    }
+    
+    created = create_user(user_dict)
+    return created
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(credentials: LoginRequest):
+    # Try looking up by username or email
+    user = get_user_by_email(credentials.username_or_email)
+    if not user:
+        user = get_user_by_username(credentials.username_or_email)
+        
+    if not user or not user.get("hashed_password"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username/email or password"
+        )
+        
+    if not verify_password(credentials.password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username/email or password"
+        )
+        
+    # Generate tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store hashed refresh token in MongoDB
+    hashed_rt = hash_refresh_token(refresh_token_val)
+    update_user_refresh_token(user["_id"], hashed_rt)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/google", response_model=TokenResponse)
+async def google_auth(req: GoogleAuthRequest):
+    # Verify the Google ID token
+    google_user = verify_google_token(req.id_token)
+    email = google_user.get("email")
+    full_name = google_user.get("name", "Google User")
+    
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google token does not contain email address"
+        )
+        
+    # Check if user already exists
+    user = get_user_by_email(email)
+    if not user:
+        # If user does not exist, create a new one.
+        # Derive username from email (e.g. part before @ + random/google indicator)
+        base_username = email.split("@")[0]
+        # Keep username safe (strip non-alphanumeric just in case, but keep it simple)
+        import re as re_username
+        base_username = re_username.sub(r'[^a-zA-Z0-9]', '', base_username)
+        # Ensure username uniqueness
+        username = base_username
+        counter = 1
+        while get_user_by_username(username):
+            username = f"{base_username}{counter}"
+            counter += 1
+            
+        user_dict = {
+            "username": username,
+            "email": email,
+            "full_name": full_name,
+            "hashed_password": None, # Google sign-in users don't need a local password
+            "role": UserRole.USER.value,
+            "hashed_refresh_token": None,
+            "created_at": datetime.utcnow()
+        }
+        user = create_user(user_dict)
+        
+    # Generate tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store hashed refresh token in MongoDB
+    hashed_rt = hash_refresh_token(refresh_token_val)
+    update_user_refresh_token(user["_id"], hashed_rt)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/refresh", response_model=TokenResponse)
+async def refresh_token(req: RefreshTokenRequest):
+    # Decode the refresh token (validates signature & expiration)
+    payload = decode_token(req.refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type (refresh token required)"
+        )
+        
+    user_id = payload.get("sub")
+    token_val = payload.get("jti")
+    
+    if not user_id or not token_val:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token payload"
+        )
+        
+    user = get_user_by_id(user_id)
+    if not user or not user.get("hashed_refresh_token"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or logged out"
+        )
+        
+    # Check if the refresh token matches the one in DB
+    hashed_rt = hash_refresh_token(token_val)
+    if user["hashed_refresh_token"] != hashed_rt:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked refresh token"
+        )
+        
+    # Generate new tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, new_refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store new hashed refresh token
+    new_hashed_rt = hash_refresh_token(new_refresh_token_val)
+    update_user_refresh_token(user["_id"], new_hashed_rt)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    update_user_refresh_token(current_user["_id"], None)
+    return {"message": "Successfully logged out"}
+
+
 # Example Request Model
 class QueryRequest(BaseModel):
     query: str
@@ -104,7 +287,7 @@ class BulkDocSourceRequest(BaseModel):
 
 # API Route for Retrieval
 @app.post("/ask")
-async def ask_question(request: QueryRequest):
+async def ask_question(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     if not request.query:
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
         
@@ -141,7 +324,7 @@ async def ask_question(request: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chunk")
-async def create_chunks(request: ChunkRequest):
+async def create_chunks(request: ChunkRequest, current_user: dict = Depends(get_current_user)):
     if not request.text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
@@ -181,7 +364,7 @@ async def create_chunks(request: ChunkRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed")
-async def generate_embeddings_endpoint(request: EmbedRequest):
+async def generate_embeddings_endpoint(request: EmbedRequest, current_admin: dict = Depends(get_current_admin_user)):
     if not request.doc_id:
         raise HTTPException(status_code=400, detail="doc_id cannot be empty")
         
@@ -196,7 +379,7 @@ async def generate_embeddings_endpoint(request: EmbedRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/all")
-async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
+async def generate_all_embeddings_endpoint(request: EmbedAllRequest, current_admin: dict = Depends(get_current_admin_user)):
     try:
         start_embedding_job(force=request.force)
         action = "full Gemini re-embedding" if request.force else "Gemini embedding backfill"
@@ -209,7 +392,7 @@ async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/missing")
-async def generate_missing_embeddings_endpoint():
+async def generate_missing_embeddings_endpoint(current_admin: dict = Depends(get_current_admin_user)):
     """Trigger background job to embed only chunks that don't have embeddings yet."""
     try:
         start_embedding_job(force=False)
@@ -221,7 +404,7 @@ async def generate_missing_embeddings_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/update-metadata")
-async def update_metadata_endpoint(request: MetadataUpdateRequest):
+async def update_metadata_endpoint(request: MetadataUpdateRequest, current_admin: dict = Depends(get_current_admin_user)):
     """Manually update the metadata (e.g. hash) of a document in MongoDB"""
     if not request.doc_id or not request.new_hash:
         raise HTTPException(status_code=400, detail="doc_id and new_hash cannot be empty")
@@ -239,7 +422,7 @@ async def update_metadata_endpoint(request: MetadataUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/document-sources", methods=["POST", "PUT"])
-async def add_document_source(request: DocSourceRequest):
+async def add_document_source(request: DocSourceRequest, current_admin: dict = Depends(get_current_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -305,7 +488,7 @@ async def add_document_source(request: DocSourceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/document-sources/bulk")
-async def add_multiple_document_sources(request: BulkDocSourceRequest):
+async def add_multiple_document_sources(request: BulkDocSourceRequest, current_admin: dict = Depends(get_current_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -357,7 +540,7 @@ async def add_multiple_document_sources(request: BulkDocSourceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/document-sources")
-async def list_document_sources():
+async def list_document_sources(current_user: dict = Depends(get_current_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -368,7 +551,7 @@ async def list_document_sources():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/document-sources/{doc_id}")
-async def delete_document_source(doc_id: str):
+async def delete_document_source(doc_id: str, current_admin: dict = Depends(get_current_admin_user)):
     """Permanently deletes a document link, its metadata, and its chunks/embeddings."""
     try:
         from database.mongo_connection import get_db_connection

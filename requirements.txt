@@ -8,5 +8,8 @@ google-genai
 python-dotenv
 requests
 schedule==1.2.2
-
+google-auth
+pyjwt
+bcrypt
+cryptography
 uvicorn
