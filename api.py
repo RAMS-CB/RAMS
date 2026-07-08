@@ -104,7 +104,7 @@ async def google_auth(req: GoogleAuthRequest):
             detail="Google token does not contain email address"
         )
         
-    if email != "rams.cb0429@gmail.com":
+    if email != "rams.cb.0429@gmail.com":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email is not authorized."
@@ -131,14 +131,14 @@ async def google_auth(req: GoogleAuthRequest):
             "email": email,
             "full_name": full_name,
             "hashed_password": None, # Google sign-in users don't need a local password
-            "role": UserRole.ADMIN.value if email == "rams.cb0429@gmail.com" else UserRole.USER.value,
+            "role": UserRole.ADMIN.value if email == "rams.cb.0429@gmail.com" else UserRole.USER.value,
             "hashed_refresh_token": None,
             "created_at": datetime.utcnow()
         }
         user = create_user(user_dict)
     else:
         # Ensure the whitelisted user always has admin role
-        if email == "rams.cb0429@gmail.com" and user.get("role") != UserRole.ADMIN.value:
+        if email == "rams.cb.0429@gmail.com" and user.get("role") != UserRole.ADMIN.value:
             from database.users import update_user_role
             update_user_role(user["_id"], UserRole.ADMIN.value)
             user["role"] = UserRole.ADMIN.value
