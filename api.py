@@ -90,64 +90,6 @@ from services.auth import (
 )
 
 # Authentication Endpoints
-@app.post("/auth/signup", response_model=UserResponse)
-async def signup(user_in: UserCreate):
-    # Check if user already exists
-    if get_user_by_email(user_in.email):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
-    if get_user_by_username(user_in.username):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already taken"
-        )
-        
-    user_dict = {
-        "username": user_in.username,
-        "email": user_in.email,
-        "full_name": user_in.full_name,
-        "hashed_password": hash_password(user_in.password),
-        "role": user_in.role.value,
-        "hashed_refresh_token": None,
-        "created_at": datetime.utcnow()
-    }
-    
-    created = create_user(user_dict)
-    return created
-
-@app.post("/auth/login", response_model=TokenResponse)
-async def login(credentials: LoginRequest):
-    # Try looking up by username or email
-    user = get_user_by_email(credentials.username_or_email)
-    if not user:
-        user = get_user_by_username(credentials.username_or_email)
-        
-    if not user or not user.get("hashed_password"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username/email or password"
-        )
-        
-    if not verify_password(credentials.password, user["hashed_password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username/email or password"
-        )
-        
-    # Generate tokens
-    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
-    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
-    
-    # Store hashed refresh token in MongoDB
-    hashed_rt = hash_refresh_token(refresh_token_val)
-    update_user_refresh_token(user["_id"], hashed_rt)
-    
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token_jwt
-    }
 
 @app.post("/auth/google", response_model=TokenResponse)
 async def google_auth(req: GoogleAuthRequest):
@@ -160,6 +102,12 @@ async def google_auth(req: GoogleAuthRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Google token does not contain email address"
+        )
+        
+    if email != "rams.cb0429@gmail.com":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not authorized."
         )
         
     # Check if user already exists
@@ -183,11 +131,17 @@ async def google_auth(req: GoogleAuthRequest):
             "email": email,
             "full_name": full_name,
             "hashed_password": None, # Google sign-in users don't need a local password
-            "role": UserRole.USER.value,
+            "role": UserRole.ADMIN.value if email == "rams.cb0429@gmail.com" else UserRole.USER.value,
             "hashed_refresh_token": None,
             "created_at": datetime.utcnow()
         }
         user = create_user(user_dict)
+    else:
+        # Ensure the whitelisted user always has admin role
+        if email == "rams.cb0429@gmail.com" and user.get("role") != UserRole.ADMIN.value:
+            from database.users import update_user_role
+            update_user_role(user["_id"], UserRole.ADMIN.value)
+            user["role"] = UserRole.ADMIN.value
         
     # Generate tokens
     access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
