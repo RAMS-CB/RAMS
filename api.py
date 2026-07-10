@@ -76,7 +76,7 @@ async def root():
 # Import authentication modules
 from datetime import datetime
 from models.user import (
-    UserCreate, GoogleAuthRequest, LoginRequest, TokenResponse,
+    RegisterRequest, GoogleAuthRequest, LoginRequest, TokenResponse,
     RefreshTokenRequest, UserResponse, UserRole
 )
 from database.users import (
@@ -89,9 +89,9 @@ from services.auth import (
     verify_google_token, get_current_user, get_current_admin_user
 )
 
-# Authentication Endpoints
 
-@app.post("/auth/google", response_model=TokenResponse)
+
+@app.post("/auth/google")
 async def google_auth(req: GoogleAuthRequest):
     # Verify the Google ID token
     google_user = verify_google_token(req.id_token)
@@ -104,44 +104,15 @@ async def google_auth(req: GoogleAuthRequest):
             detail="Google token does not contain email address"
         )
         
-    if email != "rams.cb.0429@gmail.com":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Email is not authorized."
-        )
-        
     # Check if user already exists
     user = get_user_by_email(email)
     if not user:
-        # If user does not exist, create a new one.
-        # Derive username from email (e.g. part before @ + random/google indicator)
-        base_username = email.split("@")[0]
-        # Keep username safe (strip non-alphanumeric just in case, but keep it simple)
-        import re as re_username
-        base_username = re_username.sub(r'[^a-zA-Z0-9]', '', base_username)
-        # Ensure username uniqueness
-        username = base_username
-        counter = 1
-        while get_user_by_username(username):
-            username = f"{base_username}{counter}"
-            counter += 1
-            
-        user_dict = {
-            "username": username,
+        return {
+            "registered": False,
             "email": email,
-            "full_name": full_name,
-            "hashed_password": None, # Google sign-in users don't need a local password
-            "role": UserRole.ADMIN.value if email == "rams.cb.0429@gmail.com" else UserRole.USER.value,
-            "hashed_refresh_token": None,
-            "created_at": datetime.utcnow()
+            "name": full_name,
+            "id_token": req.id_token
         }
-        user = create_user(user_dict)
-    else:
-        # Ensure the whitelisted user always has admin role
-        if email == "rams.cb.0429@gmail.com" and user.get("role") != UserRole.ADMIN.value:
-            from database.users import update_user_role
-            update_user_role(user["_id"], UserRole.ADMIN.value)
-            user["role"] = UserRole.ADMIN.value
         
     # Generate tokens
     access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
@@ -152,6 +123,85 @@ async def google_auth(req: GoogleAuthRequest):
     update_user_refresh_token(user["_id"], hashed_rt)
     
     return {
+        "registered": True,
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/register")
+async def register(req: RegisterRequest):
+    # Verify the Google ID token
+    google_user = verify_google_token(req.id_token)
+    email = google_user.get("email")
+    full_name = google_user.get("name", "Google User")
+    
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google token does not contain email address"
+        )
+        
+    # Check if user already exists
+    user = get_user_by_email(email)
+    if user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User already registered. Please login."
+        )
+
+    # Derive username from email
+    base_username = email.split("@")[0]
+    import re as re_username
+    base_username = re_username.sub(r'[^a-zA-Z0-9]', '', base_username)
+    username = base_username
+    counter = 1
+    while get_user_by_username(username):
+        username = f"{base_username}{counter}"
+        counter += 1
+
+    # Determine degree
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    degree = None
+    if domain.endswith("iitm.ac.in"):
+        if domain.startswith("ds."):
+            degree = "data science and applications"
+        elif domain.startswith("es."):
+            degree = "electronic systems"
+        elif domain.startswith("mg."):
+            degree = "management and data science"
+        elif domain.startswith("ae."):
+            degree = "aeronautics and space technology"
+        else:
+            degree = "faculty"
+
+    user_dict = {
+        "username": username,
+        "email": email,
+        "full_name": full_name,
+        "hashed_password": None,
+        "role": UserRole.USER.value,
+        "hashed_refresh_token": None,
+        "created_at": datetime.utcnow(),
+        "profession": req.profession,
+        "level": req.level,
+        "faculty_type": req.faculty_type,
+        "age": req.age,
+        "degree": degree,
+        "source": req.source,
+        "interested_programme": req.interested_programme
+    }
+    user = create_user(user_dict)
+    
+    # Generate tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store hashed refresh token in MongoDB
+    hashed_rt = hash_refresh_token(refresh_token_val)
+    update_user_refresh_token(user["_id"], hashed_rt)
+    
+    return {
+        "registered": True,
         "access_token": access_token,
         "refresh_token": refresh_token_jwt
     }

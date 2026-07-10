@@ -4,17 +4,30 @@ from enum import Enum
 from datetime import datetime
 
 class UserRole(str, Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     USER = "user"
 
 class UserBase(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    email: str = Field(..., min_length=3, max_length=100) # Simple validation instead of EmailStr to avoid email-validator dependency unless needed
+    email: str = Field(..., min_length=3, max_length=100) 
     full_name: str = Field(..., min_length=1, max_length=100)
+    profession: Optional[str] = None
+    level: Optional[str] = None
+    faculty_type: Optional[str] = None
+    age: Optional[int] = None
+    degree: Optional[str] = None
+    source: Optional[str] = None
+    interested_programme: Optional[str] = None
 
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=6)
-    role: UserRole = UserRole.USER
+class RegisterRequest(BaseModel):
+    id_token: str
+    profession: Optional[str] = None
+    level: Optional[str] = None
+    faculty_type: Optional[str] = None
+    age: Optional[int] = None
+    source: Optional[str] = None
+    interested_programme: Optional[str] = None
 
 class GoogleAuthRequest(BaseModel):
     id_token: str
