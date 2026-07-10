@@ -64,3 +64,11 @@ def update_user_role(user_id: str, role: str) -> bool:
         return result.modified_count > 0
     except Exception:
         return False
+
+def delete_user_by_id(user_id: str) -> bool:
+    try:
+        col = get_users_collection()
+        result = col.delete_one({"_id": ObjectId(user_id)})
+        return result.deleted_count > 0
+    except Exception:
+        return False

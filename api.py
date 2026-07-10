@@ -81,7 +81,7 @@ from models.user import (
 )
 from database.users import (
     get_user_by_email, get_user_by_username, create_user,
-    update_user_refresh_token, get_user_by_id
+    update_user_refresh_token, get_user_by_id, delete_user_by_id
 )
 from services.auth import (
     hash_password, verify_password, hash_refresh_token,
@@ -257,6 +257,13 @@ async def refresh_token(req: RefreshTokenRequest):
 async def logout(current_user: dict = Depends(get_current_user)):
     update_user_refresh_token(current_user["_id"], None)
     return {"message": "Successfully logged out"}
+
+@app.delete("/auth/account")
+async def delete_account(current_user: dict = Depends(get_current_user)):
+    success = delete_user_by_id(current_user["_id"])
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete account")
+    return {"message": "Account successfully deleted"}
 
 
 # Example Request Model
