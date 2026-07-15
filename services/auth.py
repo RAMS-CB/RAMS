@@ -11,7 +11,11 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
+import threading as _threading
+from bson import ObjectId
+
 from database.users import get_user_by_id
+from database.mongo_connection import get_db_connection
 from models.user import UserRole
 
 # Secret configurations
@@ -132,6 +136,19 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # Fire-and-forget: update last_active so /admin/stats can show "active now"
+    def _update_last_active():
+        try:
+            client = get_db_connection()
+            client["rams_db"]["users"].update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {"last_active": datetime.utcnow()}}
+            )
+        except Exception:
+            pass
+    _threading.Thread(target=_update_last_active, daemon=True).start()
+    
     return user
 
 async def get_current_admin_user(current_user: dict = Depends(get_current_user)) -> dict:

@@ -74,7 +74,7 @@ async def root():
     return {"message": "Welcome to the RAMS API!"}
 
 # Import authentication modules
-from datetime import datetime
+from datetime import datetime, timedelta
 from models.user import (
     RegisterRequest, GoogleAuthRequest, LoginRequest, TokenResponse,
     RefreshTokenRequest, UserResponse, UserRole
@@ -121,6 +121,17 @@ async def google_auth(req: GoogleAuthRequest):
     # Store hashed refresh token in MongoDB
     hashed_rt = hash_refresh_token(refresh_token_val)
     update_user_refresh_token(user["_id"], hashed_rt)
+    
+    # Track last_login for admin stats
+    try:
+        from bson import ObjectId
+        client = get_db_connection()
+        client["rams_db"]["users"].update_one(
+            {"_id": ObjectId(user["_id"])},
+            {"$set": {"last_login": datetime.utcnow()}}
+        )
+    except Exception:
+        pass
     
     return {
         "registered": True,
@@ -325,6 +336,17 @@ async def ask_question(request: QueryRequest, current_user: dict = Depends(get_c
         
         # Append the formatted context directly to the answer message so it displays in the frontend chat
         final_answer += "\n\n### Retrieved Context Sources\n" + context_string
+        
+        # Log the query for admin stats
+        try:
+            client = get_db_connection()
+            client["rams_db"]["query_logs"].insert_one({
+                "user_id": current_user.get("_id"),
+                "query": request.query,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception:
+            pass
         
         return {
             "question": request.query,
@@ -583,6 +605,47 @@ async def delete_document_source(doc_id: str, current_admin: dict = Depends(get_
         return {"message": f"Document '{doc_id}' and all its embeddings/chunks were permanently deleted."}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/stats")
+async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user)):
+    """Return platform-wide statistics for the admin dashboard."""
+    try:
+        from bson import ObjectId
+        client = get_db_connection()
+        db = client["rams_db"]
+        
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_ago = now - timedelta(days=7)
+        five_min_ago = now - timedelta(minutes=5)
+        
+        # User stats
+        total_users = db["users"].count_documents({})
+        active_now = db["users"].count_documents({"last_active": {"$gte": five_min_ago}})
+        logins_today = db["users"].count_documents({"last_login": {"$gte": today_start}})
+        new_users_week = db["users"].count_documents({"created_at": {"$gte": week_ago}})
+        
+        # Question stats
+        questions_today = db["query_logs"].count_documents({"timestamp": {"$gte": today_start}})
+        total_questions = db["query_logs"].count_documents({})
+        
+        # Knowledge base stats
+        total_documents = db["document_sources"].count_documents({})
+        total_chunks = db["chunks"].count_documents({})
+        
+        return {
+            "total_users": total_users,
+            "active_now": active_now,
+            "logins_today": logins_today,
+            "questions_today": questions_today,
+            "total_questions": total_questions,
+            "new_users_week": new_users_week,
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "server_time": now.isoformat()
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
