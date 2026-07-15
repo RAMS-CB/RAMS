@@ -19,7 +19,7 @@ from database.mongo_connection import get_db_connection
 from models.user import UserRole
 
 # Secret configurations
-JWT_SECRET = os.getenv("JWT_SECRET", "9a6fd58b29cda1e1493080e729a5a544c4f0393cfde2f6c039df8f7ad86fb84e")
+JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
@@ -64,6 +64,25 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return encoded_jwt, token_value
+
+def create_pin_token() -> str:
+    # 10 minute expiration for PIN token
+    expire = datetime.utcnow() + timedelta(minutes=10)
+    to_encode = {"exp": expire, "type": "admin_pin"}
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_pin_token(token: str) -> bool:
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") == "admin_pin":
+            return True
+        return False
+    except jwt.ExpiredSignatureError:
+        return False
+    except jwt.InvalidTokenError:
+        return False
 
 def decode_token(token: str) -> Dict[str, Any]:
     try:

@@ -72,3 +72,15 @@ def delete_user_by_id(user_id: str) -> bool:
         return result.deleted_count > 0
     except Exception:
         return False
+
+def get_all_users() -> list:
+    try:
+        col = get_users_collection()
+        users_cursor = col.find()
+        users = []
+        for user in users_cursor:
+            user["_id"] = str(user["_id"])
+            users.append(user)
+        return users
+    except Exception:
+        return []

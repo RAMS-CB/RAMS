@@ -1,6 +1,6 @@
 import sys
 import os
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Header
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -81,12 +81,14 @@ from models.user import (
 )
 from database.users import (
     get_user_by_email, get_user_by_username, create_user,
-    update_user_refresh_token, get_user_by_id, delete_user_by_id
+    update_user_refresh_token, get_user_by_id, delete_user_by_id,
+    get_all_users
 )
 from services.auth import (
     hash_password, verify_password, hash_refresh_token,
     create_access_token, create_refresh_token, decode_token,
-    verify_google_token, get_current_user, get_current_admin_user
+    verify_google_token, get_current_user, get_current_admin_user,
+    create_pin_token, verify_pin_token
 )
 
 
@@ -275,6 +277,52 @@ async def delete_account(current_user: dict = Depends(get_current_user)):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete account")
     return {"message": "Account successfully deleted"}
+
+class PinRequest(BaseModel):
+    pin: str
+
+@app.post("/admin/verify-pin")
+async def verify_admin_pin(req: PinRequest, current_admin: dict = Depends(get_current_admin_user)):
+    expected_pin = os.getenv("SUPER_ADMIN_PIN")
+    if not expected_pin:
+        raise HTTPException(status_code=500, detail="Super admin PIN not configured")
+    if req.pin != expected_pin:
+        raise HTTPException(status_code=403, detail="Invalid PIN")
+    
+    pin_token = create_pin_token()
+    return {"pin_token": pin_token}
+
+@app.get("/admin/users", response_model=List[UserResponse])
+async def get_admin_users(
+    x_pin_token: Optional[str] = Header(None),
+    current_admin: dict = Depends(get_current_admin_user)
+):
+    users_data = get_all_users()
+    is_unlocked = verify_pin_token(x_pin_token)
+    
+    result = []
+    for u in users_data:
+        if not is_unlocked:
+            # Mask data
+            if u.get("email"):
+                parts = u["email"].split("@")
+                if len(parts) == 2:
+                    u["email"] = f"{parts[0][0]}***@{parts[1]}"
+                else:
+                    u["email"] = "***"
+            
+            # Keep name visible as requested, but hash/mask everything else
+            u["profession"] = "***" if u.get("profession") else None
+            u["level"] = "***" if u.get("level") else None
+            u["faculty_type"] = "***" if u.get("faculty_type") else None
+            u["age"] = None
+            u["degree"] = "***" if u.get("degree") else None
+            u["source"] = "***" if u.get("source") else None
+            u["interested_programme"] = "***" if u.get("interested_programme") else None
+            
+        result.append(UserResponse(**u))
+        
+    return result
 
 
 # Example Request Model
