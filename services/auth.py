@@ -61,6 +61,25 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return encoded_jwt, token_value
 
+def create_pin_token() -> str:
+    # 10 minute expiration for PIN token
+    expire = datetime.utcnow() + timedelta(minutes=10)
+    to_encode = {"exp": expire, "type": "admin_pin"}
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_pin_token(token: str) -> bool:
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") == "admin_pin":
+            return True
+        return False
+    except jwt.ExpiredSignatureError:
+        return False
+    except jwt.InvalidTokenError:
+        return False
+
 def decode_token(token: str) -> Dict[str, Any]:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
