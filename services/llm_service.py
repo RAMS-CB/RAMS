@@ -66,3 +66,31 @@ def _generate_with_aipipe(prompt: str) -> str:
     data = response.json()
     
     return data["choices"][0]["message"]["content"]
+
+def generate_faqs(questions: List[str], count: int = 5, model_provider: str = "gemini") -> str:
+    """
+    Given a list of user questions, use the LLM to generate a JSON array of FAQs.
+    """
+    questions_str = "\n".join([f"- {q}" for q in questions])
+    prompt = f"""You are an expert at analyzing user queries and creating helpful FAQs.
+Please analyze the following recent user questions:
+
+{questions_str}
+
+Identify the {count} most common or important themes.
+For each theme, formulate a clear, generic Question and a concise Answer.
+Return the result strictly as a valid JSON array of objects, where each object has "question" and "answer" string properties.
+Example format:
+[
+  {{"question": "How do I reset my password?", "answer": "Go to settings..."}}
+]
+Do not include markdown blocks like ```json or any other text outside the JSON array.
+"""
+    try:
+        if model_provider == "aipipe":
+            return _generate_with_aipipe(prompt)
+        else:
+            return _generate_with_gemini(prompt)
+    except Exception as e:
+        print(f"Error generating FAQs with LLM: {e}")
+        return "[]"

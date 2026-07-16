@@ -697,6 +697,105 @@ async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from models.faq import FAQCreate, FAQResponse
+import json
+from bson import ObjectId
+
+@app.get("/faq", response_model=List[FAQResponse])
+async def get_faqs():
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        faqs = list(client["rams_db"]["faqs"].find({}).sort("created_at", -1))
+        for faq in faqs:
+            faq["_id"] = str(faq["_id"])
+        return faqs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/faq", response_model=FAQResponse)
+async def create_faq(req: FAQCreate, current_admin: dict = Depends(get_current_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        faq_doc = {
+            "question": req.question,
+            "answer": req.answer,
+            "created_at": datetime.utcnow(),
+            "created_by": current_admin.get("_id")
+        }
+        result = client["rams_db"]["faqs"].insert_one(faq_doc)
+        faq_doc["_id"] = str(result.inserted_id)
+        return faq_doc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/admin/faq/{faq_id}")
+async def delete_faq(faq_id: str, current_admin: dict = Depends(get_current_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        result = client["rams_db"]["faqs"].delete_one({"_id": ObjectId(faq_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="FAQ not found")
+        return {"message": "FAQ deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/faq/generate")
+async def generate_faqs_endpoint(current_admin: dict = Depends(get_current_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        from services.llm_service import generate_faqs
+        
+        client = get_db_connection()
+        
+        # Get last 50 questions
+        recent_queries = list(client["rams_db"]["query_logs"]
+                              .find({}, {"query": 1, "_id": 0})
+                              .sort("timestamp", -1)
+                              .limit(50))
+        
+        questions = [q.get("query") for q in recent_queries if q.get("query")]
+        
+        if not questions:
+            raise HTTPException(status_code=400, detail="No query history found to generate FAQs")
+            
+        generated_json_str = generate_faqs(questions, count=5)
+        
+        # Clean up JSON string if it contains markdown code blocks
+        clean_json_str = generated_json_str.strip()
+        if clean_json_str.startswith("```json"):
+            clean_json_str = clean_json_str[7:]
+        if clean_json_str.startswith("```"):
+            clean_json_str = clean_json_str[3:]
+        if clean_json_str.endswith("```"):
+            clean_json_str = clean_json_str[:-3]
+            
+        try:
+            faq_list = json.loads(clean_json_str.strip())
+        except json.JSONDecodeError:
+            print("Failed to decode LLM response:", generated_json_str)
+            raise HTTPException(status_code=500, detail="LLM generated invalid JSON")
+            
+        # Insert them into DB
+        inserted_count = 0
+        for faq_data in faq_list:
+            if "question" in faq_data and "answer" in faq_data:
+                faq_doc = {
+                    "question": faq_data["question"],
+                    "answer": faq_data["answer"],
+                    "created_at": datetime.utcnow(),
+                    "created_by": "system_llm"
+                }
+                client["rams_db"]["faqs"].insert_one(faq_doc)
+                inserted_count += 1
+                
+        return {"message": f"Successfully generated and added {inserted_count} FAQs."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     # Make sure this runs on a different port or the same port depending on your needs.
