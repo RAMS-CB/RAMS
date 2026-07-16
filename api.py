@@ -199,7 +199,7 @@ async def register(req: RegisterRequest):
         "level": req.level,
         "faculty_type": req.faculty_type,
         "age": req.age,
-        "degree": degree,
+        "degree": degree or req.degree,
         "source": req.source,
         "interested_programme": req.interested_programme
     }

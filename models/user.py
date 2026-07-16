@@ -26,6 +26,7 @@ class RegisterRequest(BaseModel):
     level: Optional[str] = None
     faculty_type: Optional[str] = None
     age: Optional[int] = None
+    degree: Optional[str] = None
     source: Optional[str] = None
     interested_programme: Optional[str] = None
 
