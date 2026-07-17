@@ -278,6 +278,11 @@ async def delete_account(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to delete account")
     return {"message": "Account successfully deleted"}
 
+@app.post("/auth/heartbeat")
+async def heartbeat(current_user: dict = Depends(get_current_user)):
+    """Lightweight heartbeat — get_current_user already updates last_active."""
+    return {"status": "ok"}
+
 class PinRequest(BaseModel):
     pin: str
 
@@ -658,7 +663,7 @@ async def delete_document_source(doc_id: str, current_admin: dict = Depends(get_
 
 @app.get("/admin/stats")
 async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user)):
-    """Return platform-wide statistics for the admin dashboard."""
+    """Return platform-wide statistics and chart data for the admin stats page."""
     try:
         from bson import ObjectId
         client = get_db_connection()
@@ -683,6 +688,60 @@ async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user))
         total_documents = db["document_sources"].count_documents({})
         total_chunks = db["chunks"].count_documents({})
         
+        # ── Chart data: Questions per day (last 7 days) ──
+        questions_per_day = []
+        try:
+            pipeline = [
+                {"$match": {"timestamp": {"$gte": week_ago}}},
+                {"$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id": 1}}
+            ]
+            raw = list(db["query_logs"].aggregate(pipeline))
+            day_map = {r["_id"]: r["count"] for r in raw}
+            for i in range(7):
+                d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+                questions_per_day.append({"date": d, "count": day_map.get(d, 0)})
+        except Exception:
+            questions_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
+        
+        # ── Chart data: New users per day (last 7 days) ──
+        users_per_day = []
+        try:
+            pipeline = [
+                {"$match": {"created_at": {"$gte": week_ago}}},
+                {"$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id": 1}}
+            ]
+            raw = list(db["users"].aggregate(pipeline))
+            day_map = {r["_id"]: r["count"] for r in raw}
+            for i in range(7):
+                d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+                users_per_day.append({"date": d, "count": day_map.get(d, 0)})
+        except Exception:
+            users_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
+        
+        # ── Chart data: Profession breakdown ──
+        profession_breakdown = []
+        try:
+            pipeline = [
+                {"$match": {"profession": {"$ne": None}}},
+                {"$group": {"_id": "$profession", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": 10}
+            ]
+            profession_breakdown = [
+                {"profession": r["_id"], "count": r["count"]}
+                for r in db["users"].aggregate(pipeline)
+            ]
+        except Exception:
+            pass
+        
         return {
             "total_users": total_users,
             "active_now": active_now,
@@ -692,7 +751,10 @@ async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user))
             "new_users_week": new_users_week,
             "total_documents": total_documents,
             "total_chunks": total_chunks,
-            "server_time": now.isoformat()
+            "server_time": now.isoformat(),
+            "questions_per_day": questions_per_day,
+            "users_per_day": users_per_day,
+            "profession_breakdown": profession_breakdown
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
