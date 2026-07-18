@@ -1,8 +1,9 @@
 import sys
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status, Header
 from pydantic import BaseModel
 from typing import List, Optional
+
 
 # Add the project root to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -72,9 +73,305 @@ async def startup_event():
 async def root():
     return {"message": "Welcome to the RAMS API!"}
 
+# Import authentication modules
+from datetime import datetime, timedelta
+from models.user import (
+    RegisterRequest, GoogleAuthRequest, LoginRequest, TokenResponse,
+    RefreshTokenRequest, UserResponse, UserRole
+)
+from database.users import (
+    get_user_by_email, get_user_by_username, create_user,
+    update_user_refresh_token, get_user_by_id, delete_user_by_id,
+    get_all_users
+)
+from services.auth import (
+    hash_password, verify_password, hash_refresh_token,
+    create_access_token, create_refresh_token, decode_token,
+    verify_google_token, get_current_user, get_current_admin_user,
+    get_current_super_admin_user, create_pin_token, verify_pin_token
+)
+
+
+
+@app.post("/auth/google")
+async def google_auth(req: GoogleAuthRequest):
+    # Verify the Google ID token
+    google_user = verify_google_token(req.id_token)
+    email = google_user.get("email")
+    full_name = google_user.get("name", "Google User")
+    
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google token does not contain email address"
+        )
+        
+    # Check if user already exists
+    user = get_user_by_email(email)
+    if not user:
+        return {
+            "registered": False,
+            "email": email,
+            "name": full_name,
+            "id_token": req.id_token
+        }
+        
+    # Promote 'rams.cb.0429@gmail.com' to super_admin automatically if not already set
+    if email.strip().lower() == "rams.cb.0429@gmail.com":
+        if user.get("role") != UserRole.SUPER_ADMIN.value:
+            from database.users import update_user_role
+            update_user_role(user["_id"], UserRole.SUPER_ADMIN.value)
+            user["role"] = UserRole.SUPER_ADMIN.value
+        
+    # Generate tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store hashed refresh token in MongoDB
+    hashed_rt = hash_refresh_token(refresh_token_val)
+    update_user_refresh_token(user["_id"], hashed_rt)
+    
+    # Track last_login for admin stats
+    try:
+        from bson import ObjectId
+        client = get_db_connection()
+        client["rams_db"]["users"].update_one(
+            {"_id": ObjectId(user["_id"])},
+            {"$set": {"last_login": datetime.utcnow()}}
+        )
+    except Exception:
+        pass
+        
+    return {
+        "registered": True,
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/register")
+async def register(req: RegisterRequest):
+    # Verify the Google ID token
+    google_user = verify_google_token(req.id_token)
+    email = google_user.get("email")
+    full_name = google_user.get("name", "Google User")
+    
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google token does not contain email address"
+        )
+        
+    # Check if user already exists
+    user = get_user_by_email(email)
+    if user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User already registered. Please login."
+        )
+
+    # Derive username from email
+    base_username = email.split("@")[0]
+    import re as re_username
+    base_username = re_username.sub(r'[^a-zA-Z0-9]', '', base_username)
+    username = base_username
+    counter = 1
+    while get_user_by_username(username):
+        username = f"{base_username}{counter}"
+        counter += 1
+
+    # Determine degree
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    degree = None
+    if domain.endswith("iitm.ac.in"):
+        if domain.startswith("ds."):
+            degree = "data science and applications"
+        elif domain.startswith("es."):
+            degree = "electronic systems"
+        elif domain.startswith("mg."):
+            degree = "management and data science"
+        elif domain.startswith("ae."):
+            degree = "aeronautics and space technology"
+        else:
+            degree = "faculty"
+
+    role = UserRole.USER.value
+    if email.strip().lower() == "rams.cb.0429@gmail.com":
+        role = UserRole.SUPER_ADMIN.value
+
+    user_dict = {
+        "username": username,
+        "email": email,
+        "full_name": full_name,
+        "hashed_password": None,
+        "role": role,
+        "hashed_refresh_token": None,
+        "created_at": datetime.utcnow(),
+        "profession": req.profession,
+        "level": req.level,
+        "faculty_type": req.faculty_type,
+        "age": req.age,
+        "degree": degree or req.degree,
+        "source": req.source,
+        "interested_programme": req.interested_programme
+    }
+    user = create_user(user_dict)
+    
+    # Generate tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store hashed refresh token in MongoDB
+    hashed_rt = hash_refresh_token(refresh_token_val)
+    update_user_refresh_token(user["_id"], hashed_rt)
+    
+    return {
+        "registered": True,
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/refresh", response_model=TokenResponse)
+async def refresh_token(req: RefreshTokenRequest):
+    # Decode the refresh token (validates signature & expiration)
+    payload = decode_token(req.refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type (refresh token required)"
+        )
+        
+    user_id = payload.get("sub")
+    token_val = payload.get("jti")
+    
+    if not user_id or not token_val:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token payload"
+        )
+        
+    user = get_user_by_id(user_id)
+    if not user or not user.get("hashed_refresh_token"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or logged out"
+        )
+        
+    # Check if the refresh token matches the one in DB
+    hashed_rt = hash_refresh_token(token_val)
+    if user["hashed_refresh_token"] != hashed_rt:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked refresh token"
+        )
+        
+    # Generate new tokens
+    access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
+    refresh_token_jwt, new_refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
+    
+    # Store new hashed refresh token
+    new_hashed_rt = hash_refresh_token(new_refresh_token_val)
+    update_user_refresh_token(user["_id"], new_hashed_rt)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_jwt
+    }
+
+@app.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user)):
+    update_user_refresh_token(current_user["_id"], None)
+    return {"message": "Successfully logged out"}
+
+@app.delete("/auth/account")
+async def delete_account(current_user: dict = Depends(get_current_user)):
+    success = delete_user_by_id(current_user["_id"])
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete account")
+    return {"message": "Account successfully deleted"}
+
+@app.post("/auth/heartbeat")
+async def heartbeat(current_user: dict = Depends(get_current_user)):
+    """Lightweight heartbeat — get_current_user already updates last_active."""
+    return {"status": "ok"}
+
+class PinRequest(BaseModel):
+    pin: str
+
+@app.post("/admin/verify-pin")
+async def verify_admin_pin(req: PinRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
+    expected_pin = os.getenv("SUPER_ADMIN_PIN")
+    if not expected_pin:
+        raise HTTPException(status_code=500, detail="Super admin PIN not configured")
+    if req.pin != expected_pin:
+        raise HTTPException(status_code=403, detail="Invalid PIN")
+    
+    pin_token = create_pin_token()
+    return {"pin_token": pin_token}
+
+@app.get("/admin/users", response_model=List[UserResponse])
+async def get_admin_users(
+    x_pin_token: Optional[str] = Header(None),
+    current_super_admin: dict = Depends(get_current_super_admin_user)
+):
+    users_data = get_all_users()
+    is_unlocked = verify_pin_token(x_pin_token)
+    
+    result = []
+    for u in users_data:
+        if not is_unlocked:
+            # Mask data
+            if u.get("email"):
+                parts = u["email"].split("@")
+                if len(parts) == 2:
+                    u["email"] = f"{parts[0][0]}***@{parts[1]}"
+                else:
+                    u["email"] = "***"
+            
+            # Keep name visible as requested, but hash/mask everything else
+            u["profession"] = "***" if u.get("profession") else None
+            u["level"] = "***" if u.get("level") else None
+            u["faculty_type"] = "***" if u.get("faculty_type") else None
+            u["age"] = None
+            u["degree"] = "***" if u.get("degree") else None
+            u["source"] = "***" if u.get("source") else None
+            u["interested_programme"] = "***" if u.get("interested_programme") else None
+            
+        result.append(UserResponse(**u))
+        
+    return result
+
+class UpdateUserRoleRequest(BaseModel):
+    role: str
+
+@app.put("/admin/users/{user_id}/role")
+async def update_user_role_route(
+    user_id: str,
+    req: UpdateUserRoleRequest,
+    current_super_admin: dict = Depends(get_current_super_admin_user)
+):
+    if req.role not in [UserRole.ADMIN.value, UserRole.USER.value]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin' or 'user'")
+        
+    target_user = get_user_by_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Cannot change the super admin's role
+    if target_user.get("email", "").strip().lower() == "rams.cb.0429@gmail.com":
+        raise HTTPException(status_code=403, detail="Cannot modify Super Admin role")
+        
+    from database.users import update_user_role
+    success = update_user_role(user_id, req.role)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update user role")
+        
+    return {"message": f"Successfully updated user role to {req.role}", "user_id": user_id, "role": req.role}
+
+
 # Example Request Model
 class QueryRequest(BaseModel):
     query: str
+    model_provider: Optional[str] = "gemini"
 
 class ChunkRequest(BaseModel):
     text: str
@@ -103,36 +400,55 @@ class BulkDocSourceRequest(BaseModel):
 
 # API Route for Retrieval
 @app.post("/ask")
-async def ask_question(request: QueryRequest):
+async def ask_question(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     if not request.query:
         raise HTTPException(status_code=400, detail="Query string cannot be empty")
         
     try:
         from services.retrieval import retrieve_documents
+        from services.llm_service import generate_answer
         
         # 1. Retrieve relevant chunks from the database
         chunks = retrieve_documents(request.query)
         
-        # 2. Extract out the actual text and scores to send to the frontend
-        context_snippets = [
-            {
-                "text": chunk.get("text_content", ""), 
-                "score": chunk.get("score", 0), 
-                "doc_id": chunk.get("doc_id", "unknown")
-            } 
-            for chunk in chunks
-        ]
+        # 2. Extract out the actual text and scores to send to the frontend in a readable format
+        formatted_context = []
+        for chunk in chunks:
+            doc_id = chunk.get("doc_id", "unknown")
+            idx = chunk.get("chunk_index", "N/A")
+            score = chunk.get("score", 0.0)
+            text = chunk.get("text_content", "").strip()
+            formatted_context.append(f"--- Doc: {doc_id} | Chunk: {idx} | Score: {score:.3f} ---\n{text}")
+            
+        context_string = "\n\n".join(formatted_context)
+        
+        # 3. Generate answer using chosen model based on the retrieved context
+        final_answer = generate_answer(request.query, chunks, request.model_provider)
+        
+        # Append the formatted context directly to the answer message so it displays in the frontend chat
+        final_answer += "\n\n### Retrieved Context Sources\n" + context_string
+        
+        # Log the query for admin stats
+        try:
+            client = get_db_connection()
+            client["rams_db"]["query_logs"].insert_one({
+                "user_id": current_user.get("_id"),
+                "query": request.query,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception:
+            pass
         
         return {
             "question": request.query,
-            "answer": "Context retrieved successfully! (LLM generation not yet hooked up)",
-            "context": context_snippets
+            "answer": final_answer,
+            "context": context_string
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chunk")
-async def create_chunks(request: ChunkRequest):
+async def create_chunks(request: ChunkRequest, current_user: dict = Depends(get_current_user)):
     if not request.text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
         
@@ -172,7 +488,7 @@ async def create_chunks(request: ChunkRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed")
-async def generate_embeddings_endpoint(request: EmbedRequest):
+async def generate_embeddings_endpoint(request: EmbedRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     if not request.doc_id:
         raise HTTPException(status_code=400, detail="doc_id cannot be empty")
         
@@ -187,7 +503,7 @@ async def generate_embeddings_endpoint(request: EmbedRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/all")
-async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
+async def generate_all_embeddings_endpoint(request: EmbedAllRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         start_embedding_job(force=request.force)
         action = "full Gemini re-embedding" if request.force else "Gemini embedding backfill"
@@ -200,7 +516,7 @@ async def generate_all_embeddings_endpoint(request: EmbedAllRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/missing")
-async def generate_missing_embeddings_endpoint():
+async def generate_missing_embeddings_endpoint(current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Trigger background job to embed only chunks that don't have embeddings yet."""
     try:
         start_embedding_job(force=False)
@@ -212,7 +528,7 @@ async def generate_missing_embeddings_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/update-metadata")
-async def update_metadata_endpoint(request: MetadataUpdateRequest):
+async def update_metadata_endpoint(request: MetadataUpdateRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Manually update the metadata (e.g. hash) of a document in MongoDB"""
     if not request.doc_id or not request.new_hash:
         raise HTTPException(status_code=400, detail="doc_id and new_hash cannot be empty")
@@ -230,7 +546,7 @@ async def update_metadata_endpoint(request: MetadataUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/document-sources", methods=["POST", "PUT"])
-async def add_document_source(request: DocSourceRequest):
+async def add_document_source(request: DocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -296,7 +612,7 @@ async def add_document_source(request: DocSourceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/document-sources/bulk")
-async def add_multiple_document_sources(request: BulkDocSourceRequest):
+async def add_multiple_document_sources(request: BulkDocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -348,7 +664,7 @@ async def add_multiple_document_sources(request: BulkDocSourceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/document-sources")
-async def list_document_sources():
+async def list_document_sources(current_user: dict = Depends(get_current_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -359,7 +675,7 @@ async def list_document_sources():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/document-sources/{doc_id}")
-async def delete_document_source(doc_id: str):
+async def delete_document_source(doc_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Permanently deletes a document link, its metadata, and its chunks/embeddings."""
     try:
         from database.mongo_connection import get_db_connection
@@ -382,6 +698,203 @@ async def delete_document_source(doc_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/stats")
+async def get_admin_stats(current_super_admin: dict = Depends(get_current_super_admin_user)):
+    """Return platform-wide statistics and chart data for the admin stats page."""
+    try:
+        from bson import ObjectId
+        client = get_db_connection()
+        db = client["rams_db"]
+        
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_ago = now - timedelta(days=7)
+        five_min_ago = now - timedelta(minutes=5)
+        
+        # User stats
+        total_users = db["users"].count_documents({})
+        active_now = db["users"].count_documents({"last_active": {"$gte": five_min_ago}})
+        logins_today = db["users"].count_documents({"last_login": {"$gte": today_start}})
+        new_users_week = db["users"].count_documents({"created_at": {"$gte": week_ago}})
+        
+        # Question stats
+        questions_today = db["query_logs"].count_documents({"timestamp": {"$gte": today_start}})
+        total_questions = db["query_logs"].count_documents({})
+        
+        # Knowledge base stats
+        total_documents = db["document_sources"].count_documents({})
+        total_chunks = db["chunks"].count_documents({})
+        
+        # ── Chart data: Questions per day (last 7 days) ──
+        questions_per_day = []
+        try:
+            pipeline = [
+                {"$match": {"timestamp": {"$gte": week_ago}}},
+                {"$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id": 1}}
+            ]
+            raw = list(db["query_logs"].aggregate(pipeline))
+            day_map = {r["_id"]: r["count"] for r in raw}
+            for i in range(7):
+                d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+                questions_per_day.append({"date": d, "count": day_map.get(d, 0)})
+        except Exception:
+            questions_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
+        
+        # ── Chart data: New users per day (last 7 days) ──
+        users_per_day = []
+        try:
+            pipeline = [
+                {"$match": {"created_at": {"$gte": week_ago}}},
+                {"$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id": 1}}
+            ]
+            raw = list(db["users"].aggregate(pipeline))
+            day_map = {r["_id"]: r["count"] for r in raw}
+            for i in range(7):
+                d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+                users_per_day.append({"date": d, "count": day_map.get(d, 0)})
+        except Exception:
+            users_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
+        
+        # ── Chart data: Profession breakdown ──
+        profession_breakdown = []
+        try:
+            pipeline = [
+                {"$match": {"profession": {"$ne": None}}},
+                {"$group": {"_id": "$profession", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": 10}
+            ]
+            profession_breakdown = [
+                {"profession": r["_id"], "count": r["count"]}
+                for r in db["users"].aggregate(pipeline)
+            ]
+        except Exception:
+            pass
+        
+        return {
+            "total_users": total_users,
+            "active_now": active_now,
+            "logins_today": logins_today,
+            "questions_today": questions_today,
+            "total_questions": total_questions,
+            "new_users_week": new_users_week,
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "server_time": now.isoformat(),
+            "questions_per_day": questions_per_day,
+            "users_per_day": users_per_day,
+            "profession_breakdown": profession_breakdown
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+from models.faq import FAQCreate, FAQResponse
+import json
+from bson import ObjectId
+
+@app.get("/faq", response_model=List[FAQResponse])
+async def get_faqs():
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        faqs = list(client["rams_db"]["faqs"].find({}).sort("created_at", -1))
+        for faq in faqs:
+            faq["_id"] = str(faq["_id"])
+        return faqs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/faq", response_model=FAQResponse)
+async def create_faq(req: FAQCreate, current_super_admin: dict = Depends(get_current_super_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        faq_doc = {
+            "question": req.question,
+            "answer": req.answer,
+            "created_at": datetime.utcnow(),
+            "created_by": current_admin.get("_id")
+        }
+        result = client["rams_db"]["faqs"].insert_one(faq_doc)
+        faq_doc["_id"] = str(result.inserted_id)
+        return faq_doc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/admin/faq/{faq_id}")
+async def delete_faq(faq_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        client = get_db_connection()
+        result = client["rams_db"]["faqs"].delete_one({"_id": ObjectId(faq_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="FAQ not found")
+        return {"message": "FAQ deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/faq/generate")
+async def generate_faqs_endpoint(current_super_admin: dict = Depends(get_current_super_admin_user)):
+    try:
+        from database.mongo_connection import get_db_connection
+        from services.llm_service import generate_faqs
+        
+        client = get_db_connection()
+        
+        # Get last 50 questions
+        recent_queries = list(client["rams_db"]["query_logs"]
+                              .find({}, {"query": 1, "_id": 0})
+                              .sort("timestamp", -1)
+                              .limit(50))
+        
+        questions = [q.get("query") for q in recent_queries if q.get("query")]
+        
+        if not questions:
+            raise HTTPException(status_code=400, detail="No query history found to generate FAQs")
+            
+        generated_json_str = generate_faqs(questions, count=5)
+        
+        # Clean up JSON string if it contains markdown code blocks
+        clean_json_str = generated_json_str.strip()
+        if clean_json_str.startswith("```json"):
+            clean_json_str = clean_json_str[7:]
+        if clean_json_str.startswith("```"):
+            clean_json_str = clean_json_str[3:]
+        if clean_json_str.endswith("```"):
+            clean_json_str = clean_json_str[:-3]
+            
+        try:
+            faq_list = json.loads(clean_json_str.strip())
+        except json.JSONDecodeError:
+            print("Failed to decode LLM response:", generated_json_str)
+            raise HTTPException(status_code=500, detail="LLM generated invalid JSON")
+            
+        # Insert them into DB
+        inserted_count = 0
+        for faq_data in faq_list:
+            if "question" in faq_data and "answer" in faq_data:
+                faq_doc = {
+                    "question": faq_data["question"],
+                    "answer": faq_data["answer"],
+                    "created_at": datetime.utcnow(),
+                    "created_by": "system_llm"
+                }
+                client["rams_db"]["faqs"].insert_one(faq_doc)
+                inserted_count += 1
+                
+        return {"message": f"Successfully generated and added {inserted_count} FAQs."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
