@@ -177,3 +177,11 @@ async def get_current_admin_user(current_user: dict = Depends(get_current_user))
             detail="Access forbidden: Admin role required"
         )
     return current_user
+
+async def get_current_super_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != UserRole.SUPER_ADMIN.value and current_user.get("role") != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Super Admin role required"
+        )
+    return current_user

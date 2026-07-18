@@ -88,7 +88,7 @@ from services.auth import (
     hash_password, verify_password, hash_refresh_token,
     create_access_token, create_refresh_token, decode_token,
     verify_google_token, get_current_user, get_current_admin_user,
-    create_pin_token, verify_pin_token
+    get_current_super_admin_user, create_pin_token, verify_pin_token
 )
 
 
@@ -116,6 +116,13 @@ async def google_auth(req: GoogleAuthRequest):
             "id_token": req.id_token
         }
         
+    # Promote 'rams.cb.0429@gmail.com' to super_admin automatically if not already set
+    if email.strip().lower() == "rams.cb.0429@gmail.com":
+        if user.get("role") != UserRole.SUPER_ADMIN.value:
+            from database.users import update_user_role
+            update_user_role(user["_id"], UserRole.SUPER_ADMIN.value)
+            user["role"] = UserRole.SUPER_ADMIN.value
+        
     # Generate tokens
     access_token = create_access_token(data={"sub": user["_id"], "role": user["role"]})
     refresh_token_jwt, refresh_token_val = create_refresh_token(data={"sub": user["_id"]})
@@ -134,7 +141,7 @@ async def google_auth(req: GoogleAuthRequest):
         )
     except Exception:
         pass
-    
+        
     return {
         "registered": True,
         "access_token": access_token,
@@ -187,12 +194,16 @@ async def register(req: RegisterRequest):
         else:
             degree = "faculty"
 
+    role = UserRole.USER.value
+    if email.strip().lower() == "rams.cb.0429@gmail.com":
+        role = UserRole.SUPER_ADMIN.value
+
     user_dict = {
         "username": username,
         "email": email,
         "full_name": full_name,
         "hashed_password": None,
-        "role": UserRole.USER.value,
+        "role": role,
         "hashed_refresh_token": None,
         "created_at": datetime.utcnow(),
         "profession": req.profession,
@@ -287,7 +298,7 @@ class PinRequest(BaseModel):
     pin: str
 
 @app.post("/admin/verify-pin")
-async def verify_admin_pin(req: PinRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def verify_admin_pin(req: PinRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     expected_pin = os.getenv("SUPER_ADMIN_PIN")
     if not expected_pin:
         raise HTTPException(status_code=500, detail="Super admin PIN not configured")
@@ -300,7 +311,7 @@ async def verify_admin_pin(req: PinRequest, current_admin: dict = Depends(get_cu
 @app.get("/admin/users", response_model=List[UserResponse])
 async def get_admin_users(
     x_pin_token: Optional[str] = Header(None),
-    current_admin: dict = Depends(get_current_admin_user)
+    current_super_admin: dict = Depends(get_current_super_admin_user)
 ):
     users_data = get_all_users()
     is_unlocked = verify_pin_token(x_pin_token)
@@ -328,6 +339,33 @@ async def get_admin_users(
         result.append(UserResponse(**u))
         
     return result
+
+class UpdateUserRoleRequest(BaseModel):
+    role: str
+
+@app.put("/admin/users/{user_id}/role")
+async def update_user_role_route(
+    user_id: str,
+    req: UpdateUserRoleRequest,
+    current_super_admin: dict = Depends(get_current_super_admin_user)
+):
+    if req.role not in [UserRole.ADMIN.value, UserRole.USER.value]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin' or 'user'")
+        
+    target_user = get_user_by_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Cannot change the super admin's role
+    if target_user.get("email", "").strip().lower() == "rams.cb.0429@gmail.com":
+        raise HTTPException(status_code=403, detail="Cannot modify Super Admin role")
+        
+    from database.users import update_user_role
+    success = update_user_role(user_id, req.role)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update user role")
+        
+    return {"message": f"Successfully updated user role to {req.role}", "user_id": user_id, "role": req.role}
 
 
 # Example Request Model
@@ -450,7 +488,7 @@ async def create_chunks(request: ChunkRequest, current_user: dict = Depends(get_
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed")
-async def generate_embeddings_endpoint(request: EmbedRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def generate_embeddings_endpoint(request: EmbedRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     if not request.doc_id:
         raise HTTPException(status_code=400, detail="doc_id cannot be empty")
         
@@ -465,7 +503,7 @@ async def generate_embeddings_endpoint(request: EmbedRequest, current_admin: dic
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/all")
-async def generate_all_embeddings_endpoint(request: EmbedAllRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def generate_all_embeddings_endpoint(request: EmbedAllRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         start_embedding_job(force=request.force)
         action = "full Gemini re-embedding" if request.force else "Gemini embedding backfill"
@@ -478,7 +516,7 @@ async def generate_all_embeddings_endpoint(request: EmbedAllRequest, current_adm
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/embed/missing")
-async def generate_missing_embeddings_endpoint(current_admin: dict = Depends(get_current_admin_user)):
+async def generate_missing_embeddings_endpoint(current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Trigger background job to embed only chunks that don't have embeddings yet."""
     try:
         start_embedding_job(force=False)
@@ -490,7 +528,7 @@ async def generate_missing_embeddings_endpoint(current_admin: dict = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/update-metadata")
-async def update_metadata_endpoint(request: MetadataUpdateRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def update_metadata_endpoint(request: MetadataUpdateRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Manually update the metadata (e.g. hash) of a document in MongoDB"""
     if not request.doc_id or not request.new_hash:
         raise HTTPException(status_code=400, detail="doc_id and new_hash cannot be empty")
@@ -508,7 +546,7 @@ async def update_metadata_endpoint(request: MetadataUpdateRequest, current_admin
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/document-sources", methods=["POST", "PUT"])
-async def add_document_source(request: DocSourceRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def add_document_source(request: DocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -574,7 +612,7 @@ async def add_document_source(request: DocSourceRequest, current_admin: dict = D
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/document-sources/bulk")
-async def add_multiple_document_sources(request: BulkDocSourceRequest, current_admin: dict = Depends(get_current_admin_user)):
+async def add_multiple_document_sources(request: BulkDocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -637,7 +675,7 @@ async def list_document_sources(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/document-sources/{doc_id}")
-async def delete_document_source(doc_id: str, current_admin: dict = Depends(get_current_admin_user)):
+async def delete_document_source(doc_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Permanently deletes a document link, its metadata, and its chunks/embeddings."""
     try:
         from database.mongo_connection import get_db_connection
@@ -662,7 +700,7 @@ async def delete_document_source(doc_id: str, current_admin: dict = Depends(get_
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/admin/stats")
-async def get_admin_stats(current_admin: dict = Depends(get_current_admin_user)):
+async def get_admin_stats(current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Return platform-wide statistics and chart data for the admin stats page."""
     try:
         from bson import ObjectId
@@ -776,7 +814,7 @@ async def get_faqs():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/faq", response_model=FAQResponse)
-async def create_faq(req: FAQCreate, current_admin: dict = Depends(get_current_admin_user)):
+async def create_faq(req: FAQCreate, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -793,7 +831,7 @@ async def create_faq(req: FAQCreate, current_admin: dict = Depends(get_current_a
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/admin/faq/{faq_id}")
-async def delete_faq(faq_id: str, current_admin: dict = Depends(get_current_admin_user)):
+async def delete_faq(faq_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         client = get_db_connection()
@@ -805,7 +843,7 @@ async def delete_faq(faq_id: str, current_admin: dict = Depends(get_current_admi
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/faq/generate")
-async def generate_faqs_endpoint(current_admin: dict = Depends(get_current_admin_user)):
+async def generate_faqs_endpoint(current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
         from database.mongo_connection import get_db_connection
         from services.llm_service import generate_faqs
