@@ -368,6 +368,69 @@ async def update_user_role_route(
     return {"message": f"Successfully updated user role to {req.role}", "user_id": user_id, "role": req.role}
 
 
+class CreateAdminUserRequest(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    role: Optional[str] = "admin"
+    profession: Optional[str] = None
+    degree: Optional[str] = None
+    level: Optional[str] = None
+
+@app.post("/admin/users")
+async def create_user_or_admin_route(
+    req: CreateAdminUserRequest,
+    current_super_admin: dict = Depends(get_current_super_admin_user)
+):
+    if req.role not in [UserRole.ADMIN.value, UserRole.USER.value]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin' or 'user'")
+        
+    email_clean = req.email.strip().lower()
+    existing_user = get_user_by_email(email_clean)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+        
+    from auth import get_password_hash
+    from database.users import create_user
+    
+    username = email_clean.split("@")[0]
+    hashed_pwd = get_password_hash(req.password)
+    
+    new_user_dict = {
+        "username": username,
+        "email": email_clean,
+        "full_name": req.full_name.strip(),
+        "password_hash": hashed_pwd,
+        "role": req.role,
+        "profession": req.profession,
+        "degree": req.degree,
+        "level": req.level,
+        "created_at": datetime.utcnow()
+    }
+    
+    created = create_user(new_user_dict)
+    return {"message": f"Successfully created {req.role}", "user": UserResponse(**created)}
+
+@app.delete("/admin/users/{user_id}")
+async def delete_user_route(
+    user_id: str,
+    current_super_admin: dict = Depends(get_current_super_admin_user)
+):
+    target_user = get_user_by_id(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if target_user.get("email", "").strip().lower() == "rams.cb.0429@gmail.com":
+        raise HTTPException(status_code=403, detail="Cannot delete Primary Super Admin")
+        
+    from database.users import delete_user_by_id
+    success = delete_user_by_id(user_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete user")
+        
+    return {"message": "User deleted successfully", "user_id": user_id}
+
+
 # Example Request Model
 class QueryRequest(BaseModel):
     query: str
