@@ -1,15 +1,19 @@
 import numpy as np
-from database.mongo_connection import get_db_connection
+from database.sanity_client import query_sanity
 from ingest.embedder import generate_query_embedding
 
 def test():
-    db = get_db_connection()['rams_db']
     query = "When is the assignment due?"
     q_emb = generate_query_embedding(query)
     
-    chunks = list(db['chunks'].find({"embedding": {"\$exists": True}}))
+    chunks = query_sanity('*[_type == "chunk" && defined(embedding)]') or []
+    if not chunks:
+        print("No chunks found with embeddings.")
+        return
+        
     for c in chunks:
-        c['score'] = np.dot(q_emb, c['embedding']) / (np.linalg.norm(q_emb) * np.linalg.norm(c['embedding']))
+        emb = c['embedding']
+        c['score'] = np.dot(q_emb, emb) / (np.linalg.norm(q_emb) * np.linalg.norm(emb))
         
     chunks.sort(key=lambda x: x['score'], reverse=True)
     top_1 = chunks[0]

@@ -66,14 +66,9 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
-# ── MongoDB persistence ─────────────────────────────────────────────
+from database.sanity_client import query_sanity, mutate_sanity
 
-def _get_collection():
-    """Return the MongoDB chunks collection."""
-    client = get_db_connection()
-    db = client[DB_NAME]
-    return db[COLLECTION_NAME]
-
+# ── Sanity persistence ─────────────────────────────────────────────
 
 def save_chunks_to_mongo(
     doc_id: str,
@@ -81,54 +76,57 @@ def save_chunks_to_mongo(
     metadata: Optional[dict] = None,
 ) -> List[str]:
     """
-    Persist a list of text chunks to MongoDB using the ChunkModel schema.
+    Persist a list of text chunks to Sanity using the ChunkModel schema.
 
     Steps:
       1. Delete any existing chunks for *doc_id* (full replacement strategy).
-      2. Build ChunkModel documents for each chunk.
-      3. Bulk‑insert into the ``chunks`` collection.
+      2. Build chunk documents for each chunk.
+      3. Bulk-insert into Sanity (_type: "chunk").
 
-    Returns the list of inserted MongoDB ``_id`` strings.
+    Returns the list of inserted Sanity ``_id`` strings.
     """
-    collection = _get_collection()
-
-    # Remove old chunks for this document so we always have a fresh set
-    delete_result = collection.delete_many({"doc_id": doc_id})
-    print(f"Deleted {delete_result.deleted_count} old chunk(s) for doc '{doc_id}'.")
-
+    # 1. Delete old chunks for this doc_id
+    existing_ids = query_sanity('*[_type == "chunk" && doc_id == $doc_id]._id', {"doc_id": doc_id}) or []
+    mutations = [{"delete": {"id": cid}} for cid in existing_ids]
+    
     if not chunks:
-        print("No chunks to save.")
+        if mutations:
+            mutate_sanity(mutations)
+            print(f"Deleted {len(mutations)} old chunk(s) for doc '{doc_id}'.")
+        print("No new chunks to save.")
         return []
 
-    # Build documents via pydantic model
-    documents = []
+    inserted_ids = []
+    # 2. Build new chunk documents
     for idx, text_content in enumerate(chunks):
-        chunk = ChunkModel(
-            doc_id=doc_id,
-            chunk_index=idx,
-            text_content=text_content,
-            metadata={
+        chunk_id = f"chunk_{hashlib.md5(f'{doc_id}_{idx}'.encode()).hexdigest()}"
+        chunk_doc = {
+            "_id": chunk_id,
+            "_type": "chunk",
+            "doc_id": doc_id,
+            "chunk_index": idx,
+            "text_content": text_content,
+            "metadata": {
                 **(metadata or {}),
                 "content_hash": hashlib.md5(text_content.encode()).hexdigest(),
             },
-            created_at=datetime.utcnow(),
-        )
-        documents.append(chunk.model_dump(by_alias=True, exclude_none=True))
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        mutations.append({"createOrReplace": chunk_doc})
+        inserted_ids.append(chunk_id)
 
-    result = collection.insert_many(documents)
-    inserted_ids = [str(oid) for oid in result.inserted_ids]
-
-    print(f"Saved {len(inserted_ids)} chunk(s) for doc '{doc_id}' to MongoDB.")
+    mutate_sanity(mutations)
+    print(f"Saved {len(inserted_ids)} chunk(s) for doc '{doc_id}' to Sanity.")
     return inserted_ids
 
 
 def get_chunks_from_mongo(doc_id: str) -> List[ChunkModel]:
     """Retrieve all chunks for a given *doc_id*, ordered by chunk_index."""
-    collection = _get_collection()
-    cursor = collection.find({"doc_id": doc_id}).sort("chunk_index", 1)
+    query = '*[_type == "chunk" && doc_id == $doc_id] | order(chunk_index asc)'
+    raw_chunks = query_sanity(query, {"doc_id": doc_id}) or []
     return [
         ChunkModel(**{**doc, "_id": str(doc["_id"])})
-        for doc in cursor
+        for doc in raw_chunks
     ]
 
 
@@ -142,7 +140,7 @@ def chunk_and_store(
     metadata: Optional[dict] = None,
 ) -> List[str]:
     """
-    End‑to‑end helper: chunk the text **and** persist to MongoDB.
+    End‑to‑end helper: chunk the text **and** persist to Sanity.
 
     Returns the list of inserted ``_id`` strings.
     """
@@ -158,8 +156,8 @@ if __name__ == "__main__":
         "It fetches documents from external sources like Google Docs. "
         "The text is then extracted and cleaned. "
         "Next the text is split into chunks for embedding. "
-        "Each chunk is stored in MongoDB with metadata. "
-        "Embeddings are generated and stored in a FAISS index. "
+        "Each chunk is stored in Sanity with metadata. "
+        "Embeddings are generated and stored with chunks. "
         "When a user asks a question, relevant chunks are retrieved. "
         "The retrieved context is sent to an LLM for a grounded answer."
     )
@@ -171,3 +169,4 @@ if __name__ == "__main__":
     stored = get_chunks_from_mongo("test_doc")
     for c in stored:
         print(f"  [{c.chunk_index}] {c.text_content[:80]}...")
+

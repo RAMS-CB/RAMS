@@ -8,8 +8,8 @@ from typing import List, Optional
 # Add the project root to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Import the main database connection strictly for startup lifecycle
-from database.mongo_connection import get_db_connection
+# Import Sanity client helpers
+from database.sanity_client import query_sanity, mutate_sanity, ping_sanity
 
 app = FastAPI(
     title="RAMS API",
@@ -54,8 +54,8 @@ def start_embedding_job(doc_id: Optional[str] = None, force: bool = False):
 @app.on_event("startup")
 async def startup_event():
     try:
-        print("Initializing FastAPI Server...")
-        get_db_connection()
+        print("Initializing FastAPI Server with Sanity Content Lake...")
+        ping_sanity()
         
         # Start the Sunday night scheduler in a separate daemon thread 
         # so it doesn't block the API requests!
@@ -133,12 +133,12 @@ async def google_auth(req: GoogleAuthRequest):
     
     # Track last_login for admin stats
     try:
-        from bson import ObjectId
-        client = get_db_connection()
-        client["rams_db"]["users"].update_one(
-            {"_id": ObjectId(user["_id"])},
-            {"$set": {"last_login": datetime.utcnow()}}
-        )
+        mutate_sanity([{
+            "patch": {
+                "id": user["_id"],
+                "set": {"last_login": datetime.utcnow().isoformat()}
+            }
+        }])
     except Exception:
         pass
         
@@ -430,12 +430,14 @@ async def ask_question(request: QueryRequest, current_user: dict = Depends(get_c
         
         # Log the query for admin stats
         try:
-            client = get_db_connection()
-            client["rams_db"]["query_logs"].insert_one({
-                "user_id": current_user.get("_id"),
-                "query": request.query,
-                "timestamp": datetime.utcnow()
-            })
+            mutate_sanity([{
+                "create": {
+                    "_type": "query_log",
+                    "user_id": current_user.get("_id"),
+                    "query": request.query,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            }])
         except Exception:
             pass
         
@@ -548,17 +550,16 @@ async def update_metadata_endpoint(request: MetadataUpdateRequest, current_super
 @app.api_route("/document-sources", methods=["POST", "PUT"])
 async def add_document_source(request: DocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        db = client["rams_db"]
-        db["document_sources"].update_one(
-            {"doc_id": request.doc_id},
-            {"$set": {
+        mutate_sanity([{
+            "createOrReplace": {
+                "_id": f"src_{request.doc_id}",
+                "_type": "document_source",
+                "doc_id": request.doc_id,
                 "title": request.title,
-                "url": request.url
-            }},
-            upsert=True
-        )
+                "url": request.url,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        }])
         
         # Run the extraction, chunking, and action trigger in the background
         import threading
@@ -614,19 +615,17 @@ async def add_document_source(request: DocSourceRequest, current_super_admin: di
 @app.post("/document-sources/bulk")
 async def add_multiple_document_sources(request: BulkDocSourceRequest, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        db = client["rams_db"]
-        
-        for source in request.sources:
-            db["document_sources"].update_one(
-                {"doc_id": source.doc_id},
-                {"$set": {
-                    "title": source.title,
-                    "url": source.url
-                }},
-                upsert=True
-            )
+        mutations = [{
+            "createOrReplace": {
+                "_id": f"src_{source.doc_id}",
+                "_type": "document_source",
+                "doc_id": source.doc_id,
+                "title": source.title,
+                "url": source.url,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        } for source in request.sources]
+        mutate_sanity(mutations)
             
         import threading
         def process_multiple_urls_bg(sources):
@@ -666,10 +665,7 @@ async def add_multiple_document_sources(request: BulkDocSourceRequest, current_s
 @app.get("/document-sources")
 async def list_document_sources(current_user: dict = Depends(get_current_user)):
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        db = client["rams_db"]
-        sources = list(db["document_sources"].find({}, {"_id": 0}))
+        sources = query_sanity('*[_type == "document_source"]{doc_id, title, url}') or []
         return {"sources": sources}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -678,108 +674,88 @@ async def list_document_sources(current_user: dict = Depends(get_current_user)):
 async def delete_document_source(doc_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Permanently deletes a document link, its metadata, and its chunks/embeddings."""
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        db = client["rams_db"]
-        
-        # 1. Remove from document sources list
-        result = db["document_sources"].delete_one({"doc_id": doc_id})
-        if result.deleted_count == 0:
+        src_id = query_sanity('*[_type == "document_source" && doc_id == $doc_id][0]._id', {"doc_id": doc_id})
+        if not src_id:
             raise HTTPException(status_code=404, detail="Document not found")
             
-        # 2. Remove from metadata tracker
-        db["metadata"].delete_one({"doc_id": doc_id})
+        mutations = [{"delete": {"id": src_id}}, {"delete": {"id": f"meta_{doc_id}"}}]
         
-        # 3. Remove all MongoDB chunks
-        db["chunks"].delete_many({"doc_id": doc_id})
-        
+        chunk_ids = query_sanity('*[_type == "chunk" && doc_id == $doc_id]._id', {"doc_id": doc_id}) or []
+        for cid in chunk_ids:
+            mutations.append({"delete": {"id": cid}})
+            
+        mutate_sanity(mutations)
         return {"message": f"Document '{doc_id}' and all its embeddings/chunks were permanently deleted."}
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/admin/stats")
 async def get_admin_stats(current_super_admin: dict = Depends(get_current_super_admin_user)):
     """Return platform-wide statistics and chart data for the admin stats page."""
     try:
-        from bson import ObjectId
-        client = get_db_connection()
-        db = client["rams_db"]
-        
         now = datetime.utcnow()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_ago = now - timedelta(days=7)
-        five_min_ago = now - timedelta(minutes=5)
+        today_start_iso = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        week_ago_iso = (now - timedelta(days=7)).isoformat()
+        five_min_ago_iso = (now - timedelta(minutes=5)).isoformat()
         
-        # User stats
-        total_users = db["users"].count_documents({})
-        active_now = db["users"].count_documents({"last_active": {"$gte": five_min_ago}})
-        logins_today = db["users"].count_documents({"last_login": {"$gte": today_start}})
-        new_users_week = db["users"].count_documents({"created_at": {"$gte": week_ago}})
+        # Counts using GROQ
+        total_users = query_sanity('count(*[_type == "user"])') or 0
+        active_now = query_sanity('count(*[_type == "user" && last_active >= $five_min_ago])', {"five_min_ago": five_min_ago_iso}) or 0
+        logins_today = query_sanity('count(*[_type == "user" && last_login >= $today_start])', {"today_start": today_start_iso}) or 0
+        new_users_week = query_sanity('count(*[_type == "user" && created_at >= $week_ago])', {"week_ago": week_ago_iso}) or 0
         
-        # Question stats
-        questions_today = db["query_logs"].count_documents({"timestamp": {"$gte": today_start}})
-        total_questions = db["query_logs"].count_documents({})
+        questions_today = query_sanity('count(*[_type == "query_log" && timestamp >= $today_start])', {"today_start": today_start_iso}) or 0
+        total_questions = query_sanity('count(*[_type == "query_log"])') or 0
         
-        # Knowledge base stats
-        total_documents = db["document_sources"].count_documents({})
-        total_chunks = db["chunks"].count_documents({})
+        total_documents = query_sanity('count(*[_type == "document_source"])') or 0
+        total_chunks = query_sanity('count(*[_type == "chunk"])') or 0
         
         # ── Chart data: Questions per day (last 7 days) ──
         questions_per_day = []
         try:
-            pipeline = [
-                {"$match": {"timestamp": {"$gte": week_ago}}},
-                {"$group": {
-                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
-                    "count": {"$sum": 1}
-                }},
-                {"$sort": {"_id": 1}}
-            ]
-            raw = list(db["query_logs"].aggregate(pipeline))
-            day_map = {r["_id"]: r["count"] for r in raw}
+            recent_logs = query_sanity('*[_type == "query_log" && timestamp >= $week_ago]{timestamp}', {"week_ago": week_ago_iso}) or []
+            log_days = {}
+            for l in recent_logs:
+                ts = l.get("timestamp", "")[:10]
+                if ts:
+                    log_days[ts] = log_days.get(ts, 0) + 1
             for i in range(7):
                 d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
-                questions_per_day.append({"date": d, "count": day_map.get(d, 0)})
+                questions_per_day.append({"date": d, "count": log_days.get(d, 0)})
         except Exception:
             questions_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
-        
+            
         # ── Chart data: New users per day (last 7 days) ──
         users_per_day = []
         try:
-            pipeline = [
-                {"$match": {"created_at": {"$gte": week_ago}}},
-                {"$group": {
-                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
-                    "count": {"$sum": 1}
-                }},
-                {"$sort": {"_id": 1}}
-            ]
-            raw = list(db["users"].aggregate(pipeline))
-            day_map = {r["_id"]: r["count"] for r in raw}
+            recent_users = query_sanity('*[_type == "user" && created_at >= $week_ago]{created_at}', {"week_ago": week_ago_iso}) or []
+            user_days = {}
+            for u in recent_users:
+                ca = u.get("created_at", "")[:10]
+                if ca:
+                    user_days[ca] = user_days.get(ca, 0) + 1
             for i in range(7):
                 d = (now - timedelta(days=6 - i)).strftime("%Y-%m-%d")
-                users_per_day.append({"date": d, "count": day_map.get(d, 0)})
+                users_per_day.append({"date": d, "count": user_days.get(d, 0)})
         except Exception:
             users_per_day = [{"date": (now - timedelta(days=6 - i)).strftime("%Y-%m-%d"), "count": 0} for i in range(7)]
-        
+            
         # ── Chart data: Profession breakdown ──
         profession_breakdown = []
         try:
-            pipeline = [
-                {"$match": {"profession": {"$ne": None}}},
-                {"$group": {"_id": "$profession", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}},
-                {"$limit": 10}
-            ]
-            profession_breakdown = [
-                {"profession": r["_id"], "count": r["count"]}
-                for r in db["users"].aggregate(pipeline)
-            ]
+            professions = query_sanity('*[_type == "user" && defined(profession)].profession') or []
+            counts = {}
+            for p in professions:
+                if p:
+                    counts[p] = counts.get(p, 0) + 1
+            sorted_p = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            profession_breakdown = [{"profession": p, "count": c} for p, c in sorted_p]
         except Exception:
             pass
-        
+            
         return {
             "total_users": total_users,
             "active_now": active_now,
@@ -799,14 +775,12 @@ async def get_admin_stats(current_super_admin: dict = Depends(get_current_super_
 
 from models.faq import FAQCreate, FAQResponse
 import json
-from bson import ObjectId
+import uuid
 
 @app.get("/faq", response_model=List[FAQResponse])
 async def get_faqs():
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        faqs = list(client["rams_db"]["faqs"].find({}).sort("created_at", -1))
+        faqs = query_sanity('*[_type == "faq"] | order(created_at desc)') or []
         for faq in faqs:
             faq["_id"] = str(faq["_id"])
         return faqs
@@ -816,16 +790,16 @@ async def get_faqs():
 @app.post("/admin/faq", response_model=FAQResponse)
 async def create_faq(req: FAQCreate, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
+        faq_id = f"faq_{uuid.uuid4().hex}"
         faq_doc = {
+            "_id": faq_id,
+            "_type": "faq",
             "question": req.question,
             "answer": req.answer,
-            "created_at": datetime.utcnow(),
-            "created_by": current_admin.get("_id")
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by": current_super_admin.get("_id")
         }
-        result = client["rams_db"]["faqs"].insert_one(faq_doc)
-        faq_doc["_id"] = str(result.inserted_id)
+        mutate_sanity([{"createOrReplace": faq_doc}])
         return faq_doc
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -833,11 +807,7 @@ async def create_faq(req: FAQCreate, current_super_admin: dict = Depends(get_cur
 @app.delete("/admin/faq/{faq_id}")
 async def delete_faq(faq_id: str, current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
-        from database.mongo_connection import get_db_connection
-        client = get_db_connection()
-        result = client["rams_db"]["faqs"].delete_one({"_id": ObjectId(faq_id)})
-        if result.deleted_count == 0:
-            raise HTTPException(status_code=404, detail="FAQ not found")
+        mutate_sanity([{"delete": {"id": faq_id}}])
         return {"message": "FAQ deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -845,25 +815,16 @@ async def delete_faq(faq_id: str, current_super_admin: dict = Depends(get_curren
 @app.post("/admin/faq/generate")
 async def generate_faqs_endpoint(current_super_admin: dict = Depends(get_current_super_admin_user)):
     try:
-        from database.mongo_connection import get_db_connection
         from services.llm_service import generate_faqs
         
-        client = get_db_connection()
-        
-        # Get last 50 questions
-        recent_queries = list(client["rams_db"]["query_logs"]
-                              .find({}, {"query": 1, "_id": 0})
-                              .sort("timestamp", -1)
-                              .limit(50))
-        
-        questions = [q.get("query") for q in recent_queries if q.get("query")]
+        recent_queries = query_sanity('*[_type == "query_log"] | order(timestamp desc)[0...50].query') or []
+        questions = [q for q in recent_queries if q]
         
         if not questions:
             raise HTTPException(status_code=400, detail="No query history found to generate FAQs")
             
         generated_json_str = generate_faqs(questions, count=5)
         
-        # Clean up JSON string if it contains markdown code blocks
         clean_json_str = generated_json_str.strip()
         if clean_json_str.startswith("```json"):
             clean_json_str = clean_json_str[7:]
@@ -878,20 +839,23 @@ async def generate_faqs_endpoint(current_super_admin: dict = Depends(get_current
             print("Failed to decode LLM response:", generated_json_str)
             raise HTTPException(status_code=500, detail="LLM generated invalid JSON")
             
-        # Insert them into DB
-        inserted_count = 0
+        mutations = []
         for faq_data in faq_list:
             if "question" in faq_data and "answer" in faq_data:
                 faq_doc = {
+                    "_id": f"faq_{uuid.uuid4().hex}",
+                    "_type": "faq",
                     "question": faq_data["question"],
                     "answer": faq_data["answer"],
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.utcnow().isoformat(),
                     "created_by": "system_llm"
                 }
-                client["rams_db"]["faqs"].insert_one(faq_doc)
-                inserted_count += 1
+                mutations.append({"createOrReplace": faq_doc})
                 
-        return {"message": f"Successfully generated and added {inserted_count} FAQs."}
+        if mutations:
+            mutate_sanity(mutations)
+            
+        return {"message": f"Successfully generated and added {len(mutations)} FAQs."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

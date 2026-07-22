@@ -1,45 +1,13 @@
 import os
-from database.mongo_connection import get_db_connection
+from services.retrieval import search_similar_chunks, retrieve_documents
 
 def test_retrieval():
-    client = get_db_connection()
-    db = client["rams_db"]
-    collection = db["chunks"]
-
-    from ingest.embedder import generate_query_embedding
-    
     query = input("\nEnter your question: ")
-    print(f"Generating embedding for: '{query}'...")
-    query_embedding = generate_query_embedding(query)
-
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "embedding",
-                "queryVector": query_embedding,
-                "numCandidates": 100,
-                "limit": 5
-            }
-        },
-        {
-            "$project": {
-                "text_content": 1,
-                "score": {
-                    "$meta": "vectorSearchScore"
-                }
-            }
-        }
-    ]
-
-    print("Running vector search pipeline...")
-    try:
-        results = list(collection.aggregate(pipeline))
-        print(f"Found {len(results)} results:")
-        for res in results:
-            print(res)
-    except Exception as e:
-        print(f"Error executing vector search: {e}")
+    print(f"Retrieving documents for: '{query}'...")
+    results = retrieve_documents(query, limit=5)
+    print(f"Found {len(results)} results:")
+    for res in results:
+        print(f"  [Doc {res.get('doc_id')} | Chunk {res.get('chunk_index')} | Score {res.get('score', 0):.3f}] {res.get('text_content', '')[:80]}...")
 
 if __name__ == "__main__":
     test_retrieval()
