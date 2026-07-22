@@ -12,61 +12,60 @@ from services.llm_service import generate_answer
 # ── Benchmark Regression Test Set (Questions × 3 Phrasings Each) ────────
 BENCHMARK_QUESTIONS = [
     {
-        "id": "q1_system_purpose",
-        "theme": "What is the primary purpose of RAMS?",
+        "id": "q1_quiz1_jee_entry",
+        "theme": "Quiz 1 requirement for JEE entry Foundation students",
         "phrasings": [
-            "What is the primary purpose and definition of RAMS?",
-            "Can you explain what RAMS stands for and what it does?",
-            "Give me a brief summary of what the RAMS application is used for."
+            "I am a Foundation level student admitted through JEE entry. Do I need to appear for Quiz 1?",
+            "Is Quiz 1 mandatory for students who joined the Foundation level via JEE entry?",
+            "As a JEE entry student in the Foundation level, am I required to take Quiz 1?"
         ]
     },
     {
-        "id": "q2_data_sources",
-        "theme": "Where does RAMS ingest documents from?",
+        "id": "q2_posh_assignment_deadline",
+        "theme": "Consequences of missing the POSH assignment deadline",
         "phrasings": [
-            "What external document sources does RAMS fetch from?",
-            "Where does the system get its knowledge base and files?",
-            "List the integrations and external services RAMS connects to for ingesting content."
+            "What happens if I miss the submission deadline for the POSH assignment?",
+            "Are there any penalties if I fail to submit the POSH assignment on time?",
+            "What are the consequences of not completing the POSH assignment before the deadline?"
         ]
     },
     {
-        "id": "q3_chunking_mechanism",
-        "theme": "How does RAMS split documents into chunks?",
+        "id": "q3_python_oppe_diploma_progression",
+        "theme": "Progression after failing Python OPPE in Foundation",
         "phrasings": [
-            "How does RAMS split text into chunks before embedding?",
-            "What is the chunking strategy and sentence boundary rule in the ingestion pipeline?",
-            "Explain the text segmentation and overlap strategy used when storing documents."
+            "Can I move to the Diploma level if I fail the Python course OPPE and complete it during the Diploma level?",
+            "If I don't clear the Python OPPE in the Foundation level, am I still allowed to progress to the Diploma level?",
+            "Will failing the Python OPPE prevent me from entering the Diploma level, or can I finish it later?"
         ]
     },
     {
-        "id": "q4_embedding_model",
-        "theme": "Which embedding model and dimension size is used?",
+        "id": "q4_bsc_after_one_diploma",
+        "theme": "Eligibility for BSc level after one Diploma",
         "phrasings": [
-            "What embedding model and vector dimension size does RAMS use?",
-            "Which Google Gemini embedding model generates the vector representations?",
-            "Tell me the dimensionality and model name configured for chunk embeddings."
+            "Can I proceed to the BSc level after completing one Diploma?",
+            "Is completing a single Diploma enough to become eligible for the BSc level?",
+            "After finishing one Diploma, am I allowed to enroll in the BSc level?"
         ]
     },
     {
-        "id": "q5_retrieval_expansion",
-        "theme": "How does context expansion work during vector search?",
+        "id": "q5_mock_exam_requirement",
+        "theme": "Whether the mock exam is compulsory",
         "phrasings": [
-            "How does adaptive context expansion work when retrieving chunks?",
-            "What happens to neighboring chunks when a base chunk is found during search?",
-            "Explain how +-1 and +-2 adjacent chunk inclusion operates in the retrieval service."
+            "Is it compulsory to take the mock exam?",
+            "Do all students have to appear for the mock examination?",
+            "Is the mock exam mandatory, or is it optional?"
         ]
     },
     {
-        "id": "q6_missing_info",
-        "theme": "Handling queries with information not present in the documentation",
+        "id": "q6_foundation_certificate_delivery",
+        "theme": "Receiving the Foundation level certificate",
         "phrasings": [
-            "What is the exact procedure for launching a space shuttle in RAMS?",
-            "How do I cook a pepperoni pizza using the RAMS API?",
-            "Does the RAMS documentation provide instructions on quantum entanglement routing?"
+            "When will I receive the hard copy of my Foundation level certificate?",
+            "How long does it take to receive the physical Foundation certificate after completing the level?",
+            "When are Foundation level certificates dispatched to students?"
         ]
     }
 ]
-
 
 def evaluate_consistency(answers: List[str]) -> Dict[str, Any]:
     """
