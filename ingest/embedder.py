@@ -132,11 +132,7 @@ def generate_query_embedding(
     )[0]
 
 
-def _get_collection():
-    """Return the MongoDB chunks collection."""
-    client = get_db_connection()
-    db = client[DB_NAME]
-    return db[COLLECTION_NAME]
+from database.sanity_client import query_sanity, mutate_sanity
 
 
 def embed_and_update_chunks(
@@ -145,12 +141,12 @@ def embed_and_update_chunks(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     """
-    Fetch all chunks for doc_id from MongoDB, generate embeddings, and update them.
+    Fetch all chunks for doc_id from Sanity, generate embeddings, and update them.
 
     Returns the number of chunks updated.
     """
-    collection = _get_collection()
-    chunks = list(collection.find({"doc_id": doc_id}).sort("chunk_index", 1))
+    query = '*[_type == "chunk" && doc_id == $doc_id] | order(chunk_index asc)'
+    chunks = query_sanity(query, {"doc_id": doc_id}) or []
 
     if not chunks:
         print(f"No chunks found for doc '{doc_id}'.")
@@ -160,16 +156,20 @@ def embed_and_update_chunks(
     print(f"Generating Gemini embeddings for {len(texts)} chunk(s) of doc '{doc_id}'...")
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
-    updated = 0
+    mutations = []
     for chunk_doc, embedding in zip(chunks, embeddings):
-        collection.update_one(
-            {"_id": chunk_doc["_id"]},
-            {"$set": {"embedding": embedding}},
-        )
-        updated += 1
+        mutations.append({
+            "patch": {
+                "id": chunk_doc["_id"],
+                "set": {"embedding": embedding}
+            }
+        })
 
-    print(f"Updated {updated} chunk(s) with Gemini embeddings for doc '{doc_id}'.")
-    return updated
+    if mutations:
+        mutate_sanity(mutations)
+
+    print(f"Updated {len(mutations)} chunk(s) with Gemini embeddings for doc '{doc_id}'.")
+    return len(mutations)
 
 
 def embed_and_update_all(
@@ -178,18 +178,19 @@ def embed_and_update_all(
     force: bool = False,
 ) -> int:
     """
-    Generate + store embeddings for chunks.
+    Generate + store embeddings for chunks in Sanity.
 
     By default this only targets chunks missing an embedding. Set force=True to
-    overwrite every stored embedding, which is useful when changing providers.
+    overwrite every stored embedding.
 
     Returns the total number of chunks updated.
     """
-    collection = _get_collection()
-    query = {} if force else {"$or": [{"embedding": None}, {"embedding": {"$exists": False}}]}
-    chunks = list(
-        collection.find(query).sort([("doc_id", 1), ("chunk_index", 1)])
-    )
+    if force:
+        query = '*[_type == "chunk"] | order(doc_id asc, chunk_index asc)'
+    else:
+        query = '*[_type == "chunk" && !defined(embedding)] | order(doc_id asc, chunk_index asc)'
+        
+    chunks = query_sanity(query) or []
 
     if not chunks:
         print("No chunks found to embed." if force else "All chunks already have embeddings.")
@@ -200,16 +201,21 @@ def embed_and_update_all(
     print(f"{action} Gemini embeddings for {len(texts)} chunk(s)...")
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
-    updated = 0
+    mutations = []
     for chunk_doc, embedding in zip(chunks, embeddings):
-        collection.update_one(
-            {"_id": chunk_doc["_id"]},
-            {"$set": {"embedding": embedding}},
-        )
-        updated += 1
+        mutations.append({
+            "patch": {
+                "id": chunk_doc["_id"],
+                "set": {"embedding": embedding}
+            }
+        })
 
-    print(f"{action} complete for {updated} chunk(s).")
-    return updated
+    if mutations:
+        mutate_sanity(mutations)
+
+    print(f"{action} complete for {len(mutations)} chunk(s).")
+    return len(mutations)
+
 
 
 if __name__ == "__main__":

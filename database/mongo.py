@@ -186,48 +186,47 @@ def fetch_document_content(doc_id: str, url: str) -> Dict[str, Any]:
 
 
 
+from database.sanity_client import query_sanity, mutate_sanity
+
 def get_stored_document_hash(doc_id: str) -> str:
-    """Check Mongo for the currently stored version/hash of the document."""
-    client = get_db_connection()
-    db = client["rams_db"]
-    
-    # Check the "metadata" collection for this document
-    doc = db["metadata"].find_one({"doc_id": doc_id})
-    if doc and "content_hash" in doc:
-        return doc["content_hash"]
-        
-    return ""
+    """Check Sanity for the currently stored version/hash of the document."""
+    try:
+        query = '*[_type == "doc_metadata" && doc_id == $doc_id][0].content_hash'
+        result = query_sanity(query, {"doc_id": doc_id})
+        return result or ""
+    except Exception as e:
+        print(f"Error fetching document hash for '{doc_id}': {e}")
+        return ""
 
 def update_mongo_metadata(doc_id: str, new_hash: str):
-    """Update MongoDB metadata with the new document hash and status."""
-    client = get_db_connection()
-    db = client["rams_db"]
-    
-    # Upsert the new hash into the "metadata" collection
-    db["metadata"].update_one(
-        {"doc_id": doc_id},
-        {"$set": {
+    """Update Sanity metadata with the new document hash and status."""
+    try:
+        doc_meta = {
+            "_id": f"meta_{doc_id}",
+            "_type": "doc_metadata",
+            "doc_id": doc_id,
             "content_hash": new_hash,
             "last_updated_timestamp": time.time()
-        }},
-        upsert=True
-    )
-    print(f"Updated Mongo metadata for document '{doc_id}' with new hash '{new_hash}'")
+        }
+        mutate_sanity([{"createOrReplace": doc_meta}])
+        print(f"Updated Sanity metadata for document '{doc_id}' with new hash '{new_hash}'")
+    except Exception as e:
+        print(f"Error updating Sanity metadata for document '{doc_id}': {e}")
 
 def chunk_text(text: str) -> list:
     # This would typically be in ingest.chunker
     return [text]
 
-
-
 def process_pipeline():
     """Main pipeline to process all documents and update DBs if changed."""
     print("Scheduler Triggered: Checking for document updates...")
     
-    client = get_db_connection()
-    db = client["rams_db"]
-    sources = list(db["document_sources"].find({}))
-    
+    try:
+        sources = query_sanity('*[_type == "document_source"]') or []
+    except Exception as e:
+        print(f"Error fetching document sources from Sanity: {e}")
+        sources = []
+        
     if not sources:
         print("No document sources registered. Pipeline execution skipped.")
         return
@@ -257,7 +256,7 @@ def process_pipeline():
             # Extract text (loader)
             text = extract_text(latest_doc)
             
-            # Create chunks AND store them in Mongo (chunker)
+            # Create chunks AND store them in Sanity (chunker)
             from ingest.chunker import chunk_and_store
             chunk_and_store(doc_id=doc_id, text=text)
             
@@ -265,7 +264,7 @@ def process_pipeline():
             from ingest.embedder import embed_and_update_chunks
             embedded_count = embed_and_update_chunks(doc_id)
             
-            # Update Mongo metadata
+            # Update Sanity metadata
             update_mongo_metadata(doc_id, new_hash)
             print(f"Pipeline execution for {doc_id} completed with {embedded_count} embedded chunk(s).")
         else:

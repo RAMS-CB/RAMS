@@ -12,11 +12,10 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
 import threading as _threading
-from bson import ObjectId
-
 from database.users import get_user_by_id
-from database.mongo_connection import get_db_connection
+from database.sanity_client import mutate_sanity
 from models.user import UserRole
+
 
 
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -159,11 +158,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     # Fire-and-forget: update last_active so /admin/stats can show "active now"
     def _update_last_active():
         try:
-            client = get_db_connection()
-            client["rams_db"]["users"].update_one(
-                {"_id": ObjectId(user_id)},
-                {"$set": {"last_active": datetime.utcnow()}}
-            )
+            mutate_sanity([{
+                "patch": {
+                    "id": user_id,
+                    "set": {"last_active": datetime.utcnow().isoformat()}
+                }
+            }])
         except Exception:
             pass
     _threading.Thread(target=_update_last_active, daemon=True).start()

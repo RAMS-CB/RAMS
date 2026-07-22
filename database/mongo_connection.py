@@ -1,41 +1,16 @@
 import os
-from pymongo import MongoClient
 from dotenv import load_dotenv
-import certifi
+from database.sanity_client import ping_sanity, query_sanity, mutate_sanity
 
-# Load environment variables
 load_dotenv()
-
-_client = None
 
 def get_db_connection():
     """
-    Connects to MongoDB using the MONGO_ID connection string.
-    Returns the cached MongoClient instance to avoid connection exhaustion.
+    Backwards-compatible helper: ping Sanity API.
     """
-    global _client
-    
-    if _client is not None:
-        return _client
-        
-    mongo_uri = os.getenv("MONGO_ID")
-    
-    if not mongo_uri:
-        raise ValueError("MONGO_ID not found in environment variables. Please check your .env file.")
-        
-    try:
-        # Use certifi to provide the required root certificates for MongoDB Atlas
-        _client = MongoClient(mongo_uri, tlsCAFile=certifi.where())
-        # Test the connection
-        _client.admin.command('ping')
-        print("Pinged your deployment. You successfully connected to MongoDB!")
-        return _client
-    except Exception as e:
-        print(f"Failed to connect to MongoDB: {e}")
-        raise
+    ping_sanity()
+    return True
 
 if __name__ == "__main__":
-    # Test the connection when the script is run directly
-    client = get_db_connection()
-    if client:
-        print("Connection ready to use!")
+    get_db_connection()
+
