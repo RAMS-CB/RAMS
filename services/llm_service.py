@@ -11,12 +11,14 @@ def generate_answer(query: str, context_chunks: List[Dict[str, Any]], model_prov
     context_texts = [chunk.get("text_content", "") for chunk in context_chunks]
     context_str = "\n\n".join(context_texts)
     
-    prompt = f"""You are an assistant.
+    prompt = f"""You are a precise technical assistant.
 
 Use ONLY the information provided below.
+Do not extrapolate, assume, or guess beyond the explicit context.
 
-If the answer is not present, say
-"I couldn't find that information."
+If the context contains conflicting or conditional statements, explicitly state both conditions and explain exactly when each applies based on the text.
+If the answer is not present in the context, state exactly:
+"I couldn't find that information in the available documentation."
 
 Context:
 {context_str}
@@ -34,10 +36,15 @@ Question:
         return "I encountered an error while trying to generate an answer."
 
 def _generate_with_gemini(prompt: str) -> str:
+    from google.genai import types
     client = get_client()
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            seed=42,
+        ),
     )
     return response.text
 
@@ -53,7 +60,9 @@ def _generate_with_aipipe(prompt: str) -> str:
     
     payload = {
         "model": "openai/gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "seed": 42
     }
     
     response = requests.post(

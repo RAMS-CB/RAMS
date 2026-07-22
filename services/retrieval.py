@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 import numpy as np
 from database.sanity_client import query_sanity
 
-def search_similar_chunks(query_embedding: List[float], limit: int = 3) -> List[Dict[str, Any]]:
+def search_similar_chunks(query_embedding: List[float], limit: int = 6) -> List[Dict[str, Any]]:
     """
     Fetch chunks with stored embeddings from Sanity and compute cosine similarity using numpy.
     Returns top matching chunks sorted by relevance score.
@@ -44,6 +44,7 @@ def search_similar_chunks(query_embedding: List[float], limit: int = 3) -> List[
 def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float]) -> List[Dict[str, Any]]:
     """
     Expands context around base_chunk dynamically by fetching neighboring chunks from Sanity.
+    +-1 neighbors are included unconditionally, while +-2 neighbors are checked against the adaptive threshold.
     """
     doc_id = base_chunk.get("doc_id")
     base_idx = base_chunk.get("chunk_index")
@@ -55,9 +56,9 @@ def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float
     
     base_score = base_chunk.get("score", 0.65)
     threshold = max(0.62, base_score - 0.05)
-    print(f"Base chunk score: {base_score:.3f}. Using dynamic threshold: {threshold:.3f}")
+    print(f"Base chunk score: {base_score:.3f}. Using dynamic threshold: {threshold:.3f} for +-2 expansion")
     
-    def fetch_and_evaluate(idx: int) -> bool:
+    def fetch_and_evaluate(idx: int, check_threshold: bool = True) -> bool:
         if idx in expanded_chunks:
             return True
             
@@ -78,8 +79,9 @@ def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float
         else:
             sim = 0.0
             
-        if sim >= threshold:
-            print(f"Expanding chunk -> Found relevant chunk {idx} for doc {doc_id} (Score: {sim:.3f})")
+        if not check_threshold or sim >= threshold:
+            reason = "Unconditional (+-1 neighbor)" if not check_threshold else f"Score: {sim:.3f} >= {threshold:.3f}"
+            print(f"Expanding chunk -> Found relevant chunk {idx} for doc {doc_id} ({reason})")
             expanded_chunks[idx] = {
                 "doc_id": doc.get("doc_id"),
                 "chunk_index": doc.get("chunk_index"),
@@ -89,37 +91,21 @@ def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float
             }
             return True
         else:
-            print(f"Stopping expansion -> Chunk {idx} for doc {doc_id} is irrelevant (Score: {sim:.3f})")
+            print(f"Stopping expansion -> Chunk {idx} for doc {doc_id} is irrelevant (Score: {sim:.3f} < {threshold:.3f})")
             return False
 
-    # Expand ahead
-    current_ahead = base_idx
-    while True:
-        relevant_found = False
-        for i in range(1, 3):
-            if fetch_and_evaluate(current_ahead + i):
-                relevant_found = True
-        if relevant_found:
-            current_ahead += 2
-        else:
-            break
+    # Expand ahead (+1 unconditional, +2 adaptive)
+    if fetch_and_evaluate(base_idx + 1, check_threshold=False):
+        fetch_and_evaluate(base_idx + 2, check_threshold=True)
             
-    # Expand behind
-    current_behind = base_idx
-    while True:
-        relevant_found = False
-        for i in range(1, 3):
-            if fetch_and_evaluate(current_behind - i):
-                relevant_found = True
-        if relevant_found:
-            current_behind -= 2
-        else:
-            break
+    # Expand behind (-1 unconditional, -2 adaptive)
+    if fetch_and_evaluate(base_idx - 1, check_threshold=False):
+        fetch_and_evaluate(base_idx - 2, check_threshold=True)
             
     return list(expanded_chunks.values())
 
 
-def retrieve_documents(query: str, limit: int = 3) -> List[Dict[str, Any]]:
+def retrieve_documents(query: str, limit: int = 6) -> List[Dict[str, Any]]:
     """
     Generate an embedding for the text query and perform a vector search.
     Then expands the context adaptively.

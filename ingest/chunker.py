@@ -17,51 +17,101 @@ ChunkModel = _chunk_mod.ChunkModel
 
 
 # ── Chunking Configuration ──────────────────────────────────────────
-CHUNK_SIZE = 500        # target characters per chunk
-CHUNK_OVERLAP = 50      # overlap between consecutive chunks
+CHUNK_SIZE = 1000       # target characters per chunk
+CHUNK_OVERLAP = 150     # overlap between consecutive chunks
 DB_NAME = "rams_db"
 COLLECTION_NAME = "chunks"
 
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+def chunk_text(
+    text: str,
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+    doc_id: str = "",
+    metadata: Optional[dict] = None,
+) -> List[str]:
     """
-    Split *text* into chunks of roughly *chunk_size* characters.
+    Split *text* into chunks of roughly *chunk_size* characters with header-aware prefixing.
 
     Strategy:
-      1. Split on sentence boundaries so chunks don't cut mid‑sentence.
-      2. Accumulate sentences until the next one would exceed *chunk_size*.
-      3. Consecutive chunks share *overlap* characters for context continuity.
-
-    Returns a list of chunk strings (empty list if input is blank).
+      1. Parse Markdown headings (#, ##, ###, etc.) line by line to maintain a hierarchical header context.
+      2. Group lines into sections under their current header path (e.g., [Doc > Header > Subheader]).
+      3. For each section, split text on sentence boundaries so chunks don't cut mid‑sentence.
+      4. Accumulate sentences until the next one would exceed *chunk_size* (accounting for prefix length).
+      5. Prefix every generated chunk with `[Doc > Header] ` so standalone vector search retains exact context hierarchy.
     """
     if not text or not text.strip():
         return []
 
-    # Split on sentence‑ending punctuation followed by whitespace
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    # Determine base document title
+    doc_title = (metadata or {}).get("title") or (metadata or {}).get("source_title") or doc_id or "Document"
+
+    # 1. Parse lines and segment by active headings
+    lines = text.strip().split("\n")
+    sections: List[tuple] = []
+    current_headers: List[str] = []
+    current_section_lines: List[str] = []
+
+    for line in lines:
+        header_match = re.match(r'^(#{1,6})\s+(.+)$', line.strip())
+        if header_match:
+            if current_section_lines and any(l.strip() for l in current_section_lines):
+                sections.append((list(current_headers), current_section_lines))
+                current_section_lines = []
+
+            level = len(header_match.group(1))
+            heading_text = header_match.group(2).strip()
+
+            if level == 1 and doc_title in ("Document", "test_doc", "") and not current_headers:
+                doc_title = heading_text
+                current_headers = [heading_text]
+            else:
+                target_depth = max(0, level - 1)
+                current_headers = current_headers[:target_depth]
+                current_headers.append(heading_text)
+        else:
+            current_section_lines.append(line)
+
+    if current_section_lines and any(l.strip() for l in current_section_lines):
+        sections.append((list(current_headers), current_section_lines))
+
+    if not sections and text.strip():
+        sections = [([], [text.strip()])]
 
     chunks: List[str] = []
-    current_chunk = ""
 
-    for sentence in sentences:
-        # If adding this sentence still fits, accumulate
-        if len(current_chunk) + len(sentence) + 1 <= chunk_size:
-            current_chunk = f"{current_chunk} {sentence}".strip()
-        else:
-            # Save current chunk if non‑empty
-            if current_chunk:
-                chunks.append(current_chunk)
+    # 2. Chunk each section separately with its header prefix
+    for active_headers, section_lines in sections:
+        section_text = "\n".join(section_lines).strip()
+        if not section_text:
+            continue
 
-            # Start next chunk with overlap from the tail of the previous one
-            if overlap > 0 and current_chunk:
-                overlap_text = current_chunk[-overlap:]
-                current_chunk = f"{overlap_text} {sentence}".strip()
+        path_parts = [doc_title] + [h for h in active_headers if h != doc_title]
+        header_path = " > ".join(path_parts)
+        prefix = f"[{header_path}] " if header_path else ""
+
+        effective_chunk_size = max(200, chunk_size - len(prefix))
+
+        sentences = re.split(r'(?<=[.!?])\s+', section_text)
+
+        current_chunk = ""
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+            if len(current_chunk) + len(sentence) + 1 <= effective_chunk_size:
+                current_chunk = f"{current_chunk} {sentence}".strip()
             else:
-                current_chunk = sentence
+                if current_chunk:
+                    chunks.append(f"{prefix}{current_chunk}")
 
-    # Don't forget the last chunk
-    if current_chunk:
-        chunks.append(current_chunk)
+                if overlap > 0 and current_chunk:
+                    overlap_text = current_chunk[-overlap:]
+                    current_chunk = f"{overlap_text} {sentence}".strip()
+                else:
+                    current_chunk = sentence
+
+        if current_chunk:
+            chunks.append(f"{prefix}{current_chunk}")
 
     return chunks
 
@@ -144,7 +194,7 @@ def chunk_and_store(
 
     Returns the list of inserted ``_id`` strings.
     """
-    chunks = chunk_text(text, chunk_size, overlap)
+    chunks = chunk_text(text, chunk_size, overlap, doc_id=doc_id, metadata=metadata)
     print(f"Text chunked into {len(chunks)} piece(s) (size={chunk_size}, overlap={overlap}).")
     return save_chunks_to_mongo(doc_id, chunks, metadata)
 
