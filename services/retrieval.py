@@ -5,40 +5,27 @@ from database.sanity_client import query_sanity
 
 def search_similar_chunks(query_embedding: List[float], limit: int = 6) -> List[Dict[str, Any]]:
     """
-    Fetch chunks with stored embeddings from Sanity and compute cosine similarity using numpy.
+    Search Pinecone for the most similar chunks.
     Returns top matching chunks sorted by relevance score.
     """
+    from database.pinecone_client import search_vectors
     try:
-        query_vec = np.array(query_embedding)
-        groq_query = '*[_type == "chunk" && defined(embedding)]{_id, doc_id, chunk_index, text_content, metadata, embedding}'
-        chunks = query_sanity(groq_query) or []
+        results = search_vectors(query_embedding, limit=limit)
         
         scored_chunks = []
-        for chunk in chunks:
-            emb = chunk.get("embedding")
-            if not emb:
-                continue
-            emb_vec = np.array(emb)
+        if hasattr(results, 'matches'):
+            for match in results.matches:
+                scored_chunks.append({
+                    "doc_id": match.metadata.get("doc_id"),
+                    "chunk_index": int(match.metadata.get("chunk_index", 0)),
+                    "text_content": match.metadata.get("text_content", ""),
+                    "metadata": match.metadata,
+                    "score": float(match.score)
+                })
             
-            norm_q = np.linalg.norm(query_vec)
-            norm_c = np.linalg.norm(emb_vec)
-            if norm_q > 0 and norm_c > 0:
-                sim = np.dot(query_vec, emb_vec) / (norm_q * norm_c)
-            else:
-                sim = 0.0
-                
-            scored_chunks.append({
-                "doc_id": chunk.get("doc_id"),
-                "chunk_index": chunk.get("chunk_index"),
-                "text_content": chunk.get("text_content"),
-                "metadata": chunk.get("metadata"),
-                "score": float(sim)
-            })
-            
-        scored_chunks.sort(key=lambda x: x["score"], reverse=True)
-        return scored_chunks[:limit]
+        return scored_chunks
     except Exception as e:
-        print(f"Error executing similarity search on Sanity: {e}")
+        print(f"Error executing similarity search on Pinecone: {e}")
         return []
 
 def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float]) -> List[Dict[str, Any]]:

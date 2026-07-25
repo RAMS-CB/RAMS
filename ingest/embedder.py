@@ -157,6 +157,7 @@ def embed_and_update_chunks(
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
     mutations = []
+    pinecone_vectors = []
     for chunk_doc, embedding in zip(chunks, embeddings):
         mutations.append({
             "patch": {
@@ -164,9 +165,20 @@ def embed_and_update_chunks(
                 "set": {"embedding": embedding}
             }
         })
+        pinecone_vectors.append({
+            "id": chunk_doc["_id"],
+            "values": embedding,
+            "metadata": {
+                "doc_id": chunk_doc["doc_id"],
+                "chunk_index": chunk_doc["chunk_index"],
+                "text_content": chunk_doc.get("text_content", "")
+            }
+        })
 
     if mutations:
         mutate_sanity(mutations)
+        from database.pinecone_client import upsert_vectors
+        upsert_vectors(pinecone_vectors)
 
     print(f"Updated {len(mutations)} chunk(s) with Gemini embeddings for doc '{doc_id}'.")
     return len(mutations)
@@ -202,6 +214,7 @@ def embed_and_update_all(
     embeddings = generate_embeddings(texts, model_name=model_name, batch_size=batch_size)
 
     mutations = []
+    pinecone_vectors = []
     for chunk_doc, embedding in zip(chunks, embeddings):
         mutations.append({
             "patch": {
@@ -209,9 +222,20 @@ def embed_and_update_all(
                 "set": {"embedding": embedding}
             }
         })
+        pinecone_vectors.append({
+            "id": chunk_doc["_id"],
+            "values": embedding,
+            "metadata": {
+                "doc_id": chunk_doc["doc_id"],
+                "chunk_index": chunk_doc["chunk_index"],
+                "text_content": chunk_doc.get("text_content", "")
+            }
+        })
 
     if mutations:
         mutate_sanity(mutations)
+        from database.pinecone_client import upsert_vectors
+        upsert_vectors(pinecone_vectors)
 
     print(f"{action} complete for {len(mutations)} chunk(s).")
     return len(mutations)

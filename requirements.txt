@@ -11,3 +11,4 @@ pyjwt
 bcrypt
 cryptography
 uvicorn
+pinecone
