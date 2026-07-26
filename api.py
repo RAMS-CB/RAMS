@@ -870,7 +870,7 @@ async def test_pinecone_connection():
     try:
         from database.pinecone_client import get_pinecone_index
         index = get_pinecone_index()
-        stats = index.describe_index_stats()
+        stats = index.describe_index_stats().to_dict()
         return {"status": "success", "stats": stats, "message": "Pinecone is working perfectly!"}
     except Exception as e:
         import traceback
