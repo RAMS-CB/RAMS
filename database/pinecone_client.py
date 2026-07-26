@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 
 def get_pinecone_index():
     api_key = os.getenv("PINECONE_API_KEY")
-    index_name = os.getenv("PINECONE_INDEX_NAME", "rams-index")
+    index_name = os.getenv("PINECONE_INDEX_NAME", "rams")
     
     if not api_key:
         raise ValueError("PINECONE_API_KEY must be set in the environment.")
