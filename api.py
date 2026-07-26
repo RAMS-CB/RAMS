@@ -864,3 +864,14 @@ if __name__ == "__main__":
     import uvicorn
     # Make sure this runs on a different port or the same port depending on your needs.
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+
+@app.get("/test-pinecone")
+async def test_pinecone_connection():
+    try:
+        from database.pinecone_client import get_pinecone_index
+        index = get_pinecone_index()
+        stats = index.describe_index_stats()
+        return {"status": "success", "stats": stats, "message": "Pinecone is working perfectly!"}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
