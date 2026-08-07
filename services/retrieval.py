@@ -92,6 +92,47 @@ def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float
     return list(expanded_chunks.values())
 
 
+def _expand_query(query: str) -> str:
+    """
+    For short or acronym-heavy queries, use the LLM to expand into
+    a search-friendly form so the embedding better matches document chunks.
+    """
+    word_count = len(query.strip().split())
+    if word_count > 6:
+        return query  # Long queries are descriptive enough
+
+    try:
+        from ingest.embedder import get_client
+        from google.genai import types
+        client = get_client()
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=(
+                "You are a query expansion tool for an IIT Madras BS Degree student knowledge base. "
+                "Given the student's short query, expand any acronyms or abbreviations "
+                "(e.g. OPPE = Online Proctored Practice Examination, GAA = Graded Assignment Average, "
+                "AQET = Academic Qualifying Eligibility Test, CGPA = Cumulative Grade Point Average, "
+                "LLM = Large Language Model, BS = Bachelor of Science) "
+                "and rephrase into a detailed search-friendly sentence. "
+                "Return ONLY the expanded query, nothing else.\n\n"
+                f"Query: {query}"
+            ),
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=80,
+            ),
+        )
+        expanded = response.text.strip()
+        if expanded:
+            print(f"Query expansion: '{query}' -> '{expanded}'")
+            return f"{query} {expanded}"
+    except Exception as e:
+        print(f"Query expansion failed (non-fatal): {e}")
+
+    return query
+
+
 def retrieve_documents(query: str, limit: int = 6) -> List[Dict[str, Any]]:
     """
     Generate an embedding for the text query and perform a vector search.
@@ -100,7 +141,10 @@ def retrieve_documents(query: str, limit: int = 6) -> List[Dict[str, Any]]:
     """
     from ingest.embedder import generate_query_embedding
     
-    query_embedding = generate_query_embedding(query)
+    # Expand short/acronym queries for better embedding match
+    search_query = _expand_query(query)
+    
+    query_embedding = generate_query_embedding(search_query)
     base_chunks = search_similar_chunks(query_embedding, limit=limit)
     
     all_expanded_chunks = {}
