@@ -42,7 +42,7 @@ def expand_chunk_context(base_chunk: Dict[str, Any], query_embedding: List[float
     expanded_chunks = {base_idx: base_chunk}
     
     base_score = base_chunk.get("score", 0.65)
-    threshold = max(0.62, base_score - 0.05)
+    threshold = max(0.68, base_score - 0.04)
     print(f"Base chunk score: {base_score:.3f}. Using dynamic threshold: {threshold:.3f} for +-2 expansion")
     
     def fetch_and_evaluate(idx: int, check_threshold: bool = True) -> bool:

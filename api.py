@@ -411,7 +411,11 @@ async def ask_question(request: QueryRequest, current_user: dict = Depends(get_c
         # 1. Retrieve relevant chunks from the database
         chunks = retrieve_documents(request.query)
         
-        # 2. Extract out the actual text and scores to send to the frontend in a readable format
+        # 2. Cap the number of chunks sent to the LLM to avoid context overload
+        MAX_LLM_CHUNKS = 10
+        scored_chunks = sorted(chunks, key=lambda c: c.get("score", 0), reverse=True)[:MAX_LLM_CHUNKS]
+        
+        # 3. Build a readable context string for the separate response field (admin/debug use only)
         formatted_context = []
         for chunk in chunks:
             doc_id = chunk.get("doc_id", "unknown")
@@ -422,11 +426,26 @@ async def ask_question(request: QueryRequest, current_user: dict = Depends(get_c
             
         context_string = "\n\n".join(formatted_context)
         
-        # 3. Generate answer using chosen model based on the retrieved context
-        final_answer = generate_answer(request.query, chunks, request.model_provider)
+        # 4. Generate answer using chosen model based on the retrieved context
+        final_answer = generate_answer(request.query, scored_chunks, request.model_provider)
         
-        # Append the formatted context directly to the answer message so it displays in the frontend chat
-        final_answer += "\n\n### Retrieved Context Sources\n" + context_string
+        # 5. Build structured sources list for the frontend (unique doc_id -> title + url)
+        seen_doc_ids = set()
+        sources = []
+        for chunk in scored_chunks:
+            doc_id = chunk.get("doc_id", "")
+            if doc_id and doc_id not in seen_doc_ids:
+                seen_doc_ids.add(doc_id)
+                # Lookup the document source record from Sanity for title + url
+                src = query_sanity(
+                    '*[_type == "document_source" && doc_id == $doc_id][0]{title, url}',
+                    {"doc_id": doc_id}
+                )
+                sources.append({
+                    "doc_id": doc_id,
+                    "title": (src or {}).get("title") or doc_id,
+                    "url": (src or {}).get("url") or ""
+                })
         
         # Log the query for admin stats
         try:
@@ -444,6 +463,7 @@ async def ask_question(request: QueryRequest, current_user: dict = Depends(get_c
         return {
             "question": request.query,
             "answer": final_answer,
+            "sources": sources,
             "context": context_string
         }
     except Exception as e:
